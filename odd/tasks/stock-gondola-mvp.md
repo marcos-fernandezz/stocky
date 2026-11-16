@@ -31,10 +31,10 @@ Asumido para el MVP: sin autenticación (el repositor se identifica con un nombr
 
 | ID | Specs | Features | Ruta | Estado | Commit |
 |---|---|---|---|---|---|
-| T1 | S1, S3, S4, S5, S6 | F1–F5 dominio + tests de aceptación §12 | inline (sin trigger de writer: una unidad secuencial) | pendiente | — |
-| T2 | S2, S3 | F6 API + SSE + tick | inline | pendiente | — |
-| T3 | S2, S3, S7 | F7 + F8 UIs y simulador | inline | pendiente | — |
-| T4 | — | README de ejecución | inline | pendiente | — |
+| T1 | S1, S3, S4, S5, S6 | F1–F5 dominio + tests de aceptación §12 | inline (sin trigger de writer: una unidad secuencial) | ✅ hecho | cd40090 |
+| T2 | S2, S3 | F6 API + SSE + tick | inline | ✅ hecho | f1cf4d2 |
+| T3 | S2, S3, S7 | F7 + F8 UIs y simulador | inline | ✅ hecho | 46b019a |
+| T4 | — | README de ejecución | inline | ✅ hecho | 46b019a |
 
 ## Log
 
@@ -42,3 +42,7 @@ Asumido para el MVP: sin autenticación (el repositor se identifica con un nombr
 - **L2**: Spec de referencia: `specs/spec-00-reposicion-gondola.md` (pedido original verbatim: "generes la especificacion para generar un sistema donde los repositores se encarguen de al momento de reponer productos actualicen el sistema para que se tenga data en tiempo real del estado de la sucursal para que los repositores puedan tener data fresca de que productos deben reponer y que la alerta al acceder el umbral notifique al repositor que ese producto se debe reponer con urgencia; ademas cada producto debe tener una metrica de cuantos productos tiene respecto a los que tenia notificados por el repositor; que por cada ticket generado en caja se descuente esa cantidad que el repositor habia notificado").
 - **L3**: Decisión de stack: Python stdlib sin dependencias (no hay fastapi/pytest instalados; corre en cualquier máquina del hackatón). `vendido_desde_conteo` se **deriva** de las ventas (emitido_at > conteo_at, no anuladas) en lugar de un contador: la llegada tardía y las anulaciones quedan bien sin lógica extra, y la atomicidad se reduce a insertar el comprobante en una transacción.
 - **L4**: Corrección a la spec: RF-01 decía cerrar alertas "VACIO" (no es un tipo de alerta) → VERIFICAR. Anulación = anula la venta completa referenciada.
+- **L5**: T1 RED→GREEN: el fallback "sin historial" contaba las ventas de hoy como historial (umbral 2 en vez de 3) → el historial termina al inicio del día. 20 tests de dominio, incluidos los 9 criterios de §12.
+- **L6**: T2: una venta emitida en el mismo segundo que el conteo no descontaba → `emitido_at ≥ conteo_at` (spec actualizada: ante la duda, la alerta llega antes). Lecturas y escrituras serializadas con un solo lock sobre la conexión compartida. 4 tests de API (incluye SSE).
+- **L7**: T3: el `estado` del producto pisaba el de la alerta en `/reposicion` → campo `estado_producto` + test. `prompt()` para el nombre bloqueaba la UI → campo en el encabezado. Capturas verificadas (Chrome headless no puede capturar con SSE abierto; se capturó una copia sin stream).
+- **L8**: Verificación: `python3 -m unittest` → 24 OK. Smoke test con servidor + seed con historial + simulador: umbral por franja activo (leche 1,75 u/h). RDD: assess en cada commit → `medium / under_budget` (sin revisión obligatoria). Pendiente: probar notificaciones en un celular real.
