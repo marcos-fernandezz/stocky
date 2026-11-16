@@ -8,9 +8,10 @@ const published: unknown[] = [];
 vi.mock("@/lib/db", async (orig) => ({ ...(await orig<typeof import("@/lib/db")>()), getDb: () => db }));
 vi.mock("@/lib/realtime", () => ({ publish: async (ev: unknown[]) => void published.push(...ev) }));
 
-const { POST: postConteo } = await import("@/app/api/sucursales/[s]/conteos/route");
+const { POST: postReporte } = await import("@/app/api/sucursales/[s]/reportes/route");
 const { GET: getProductos } = await import("@/app/api/sucursales/[s]/productos/route");
-const { GET: getReposicion } = await import("@/app/api/sucursales/[s]/reposicion/route");
+const { GET: getRonda } = await import("@/app/api/sucursales/[s]/ronda/route");
+const { GET: getSucursal, PATCH: patchSucursal } = await import("@/app/api/sucursales/[s]/route");
 const { GET: getAlertas } = await import("@/app/api/sucursales/[s]/alertas/route");
 const { GET: getSucursales } = await import("@/app/api/sucursales/route");
 const { POST: postVenta } = await import("@/app/api/ventas/route");
@@ -33,25 +34,36 @@ beforeEach(async () => {
 });
 
 describe("route handlers", () => {
-  it("count, sale, duplicate and state", async () => {
-    const [st] = await json(await postConteo(req({ producto_id: "ID-1", unidades: 12, repositor_id: "ana" }), ctx({ s: "S1" })));
-    expect(st).toBe(201);
-    expect((await venta("C1", 10)).status).toBe(201);
-    const [st2, dup] = await json(await venta("C1", 10));
+  it("sale, duplicate, quiebre report and product state", async () => {
+    expect((await venta("C1", 3)).status).toBe(201);
+    const [st2, dup] = await json(await venta("C1", 3));
     expect([st2, dup.duplicado]).toEqual([200, true]);
+    const [st3] = await json(await postReporte(req({ producto_id: "ID-1", resultado: "SIN_STOCK", repositor_id: "ana" }), ctx({ s: "S1" })));
+    expect(st3).toBe(201);
     const [, productos] = await json(await getProductos(req(), ctx({ s: "S1" })));
     const leche = productos.find((p: any) => p.producto_id === "ID-1");
-    expect([leche.stock_gondola, leche.nivel, leche.estado]).toEqual([2, 17, "BAJO"]);
-    const [, lista] = await json(await getReposicion(req(), ctx({ s: "S1" })));
-    expect([lista.items[0].producto_id, lista.items[0].tipo]).toEqual(["ID-1", "REPONER"]);
-    expect(published.some((e: any) => e.type === "alerta.creada" && e.data.prioridad === "ALTA")).toBe(true);
+    expect([leche.vendido_hoy, leche.estado, leche.alertas[0].tipo]).toEqual([3, "QUIEBRE", "SIN_STOCK"]);
+    const [, enc] = await json(await getAlertas(req(undefined, "http://x/?destinatario=ENCARGADO"), ctx({ s: "S1" })));
+    expect(enc.map((a: any) => a.tipo)).toEqual(["SIN_STOCK"]);
+    expect(published.some((e: any) => e.type === "alerta.creada" && e.data.tipo === "SIN_STOCK")).toBe(true);
     expect((await json(await getSucursales()))[1]).toEqual(["S1", "S2"]);
   });
 
+  it("the encargado sets the rounds per day; the round view uses them", async () => {
+    const [st, cfg] = await json(await patchSucursal(req({ pasadas_por_dia: 4 }), ctx({ s: "S1" })));
+    expect([st, cfg.pasadas_por_dia]).toEqual([200, 4]);
+    expect((await json(await getSucursal(req(), ctx({ s: "S1" }))))[1].pasadas_por_dia).toBe(4);
+    const [, ronda] = await json(await getRonda(req(), ctx({ s: "S1" })));
+    expect(ronda.sucursal.pasadas_por_dia).toBe(4);
+    expect(ronda).toHaveProperty("periodo");
+    expect(Array.isArray(ronda.alertas)).toBe(true);
+    expect((await patchSucursal(req({ pasadas_por_dia: 0 }), ctx({ s: "S1" }))).status).toBe(422);
+    expect((await getSucursal(req(), ctx({ s: "NOPE" }))).status).toBe(404);
+  });
+
   it("errors map to status codes", async () => {
-    const [st, err] = await json(await postConteo(req({ producto_id: "ID-1", unidades: 99, repositor_id: "a" }), ctx({ s: "S1" })));
-    expect(st).toBe(409);
-    expect(err.error).toContain("capacidad de 12");
+    expect((await postReporte(req({ producto_id: "ZZZ", resultado: "OK", repositor_id: "a" }), ctx({ s: "S1" }))).status).toBe(404);
+    expect((await postReporte(req({ producto_id: "ID-1", resultado: "X", repositor_id: "a" }), ctx({ s: "S1" }))).status).toBe(422);
     expect((await postVenta(req({ comprobante_id: "X" }))).status).toBe(422);
     expect((await postVenta(new Request("http://x/", { method: "POST", body: "{nope" }))).status).toBe(422);
     expect((await postVenta(new Request("http://x/", { method: "POST", body: " ".repeat(1_000_001) }))).status).toBe(422);
@@ -60,8 +72,8 @@ describe("route handlers", () => {
   });
 
   it("dismissing an alert needs a reason and only works once", async () => {
-    await venta("C1"); // no count -> RECONTAR
-    const [, alertas] = await json(await getAlertas(req(undefined, "http://x/?destinatario=REPOSITOR"), ctx({ s: "S1" })));
+    await postReporte(req({ producto_id: "ID-1", resultado: "SIN_STOCK", repositor_id: "ana" }), ctx({ s: "S1" }));
+    const [, alertas] = await json(await getAlertas(req(undefined, "http://x/?destinatario=ENCARGADO"), ctx({ s: "S1" })));
     const id = String(alertas[0].id);
     expect((await patchAlerta(req({}), ctx({ id }))).status).toBe(422);
     expect((await patchAlerta(req({ motivo: "producto discontinuado" }), ctx({ id }))).status).toBe(200);

@@ -13,7 +13,7 @@ function authorized(req: Request): boolean {
   return !!secret && given.length === expected.length && timingSafeEqual(Buffer.from(given), Buffer.from(expected));
 }
 
-/** Periodic re-evaluation (hour-slot thresholds, stale counts, R3). Called every minute by pg_cron (README). */
+/** Periodic re-evaluation (opens rounds, checks sales anomalies). Called every minute by pg_cron (README). */
 const tick = (req: Request) => handle(async () => {
   if (!authorized(req)) return NextResponse.json({ error: "no autorizado" }, { status: 401 });
   const eventos = await getStock().tick(businessNow());

@@ -31,7 +31,7 @@ export async function pgliteDb(seeds = ["seed.sql"]): Promise<Db> {
   const { readFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
   const pg = new PGlite();
-  for (const f of ["migrations/0001_init.sql", ...seeds]) await pg.exec(await readFile(join(process.cwd(), "supabase", f), "utf8"));
+  for (const f of ["migrations/0001_init.sql", "migrations/0002_rondas.sql", ...seeds]) await pg.exec(await readFile(join(process.cwd(), "supabase", f), "utf8"));
   const wrap = (c: PGliteLike): Q => ({ query: async (text, params = []) => (await c.query(text, params as any[])).rows as any });
   return { ...wrap(pg), tx: (fn) => pg.transaction((t) => fn(wrap(t))) };
 }

@@ -1,28 +1,21 @@
-/** Shelf stock domain: counts, sales, thresholds and alerts (spec-00). */
+/** Rounds per period and sales-anomaly alerts (spec-01). No estimated shelf stock: sales history drives everything. */
 import type { Db, Q, Row } from "./db";
 import { ConflictError, DomainError, NotFoundError } from "./errors";
-import { HOUR, fromIso, iso, parseTs, plus, startOfDay, startOfHour } from "./time";
+import { HOUR, fromIso, iso, parseTs, plus, startOfDay } from "./time";
 
-export const SEGURIDAD = 1;              // safety units in the threshold formula
-export const RESPUESTA_DEFAULT_H = 0.5;  // response time until there is history
-export const CONTEO_VENCE_H = 24;        // a count older than this asks for a recount
-export const ALTA_ROTACION_UH = 1.0;     // units/hour from which silence-detection (R3) applies
-export const P_SILENCIO = 0.05;          // R3 fires when P(no sales in the elapsed time) < this
+export const P_ANOMALIA = 0.05; // VENTA_ANOMALA fires when P(selling this little | expected) < this
 const SEMANAS = 4;
 const WEEK = 7 * 24 * HOUR;
 
 export const PRIORIDADES = ["URGENTE", "ALTA", "MEDIA", "BAJA"] as const;
-const TIPOS_CONTEO = new Set(["REPOSICION", "VERIFICACION", "INICIAL"]);
-const CIERRA_AL_CONTAR = "'REPONER', 'VERIFICAR', 'RECONTAR'"; // closed by a count (RF-01)
+export const RESULTADOS = ["OK", "REPUSE", "SIN_STOCK"] as const;
 
 export type Evento = { type: "producto.actualizado" | "alerta.creada" | "alerta.cerrada"; sucursal_id: string; data: Row };
-export type Snapshot = Row & { estado: string; estado_anterior: string };
+export type Periodo = { n: number; de: number; inicio: string; fin: string };
 
-const prio = (p: string) => PRIORIDADES.indexOf(p as (typeof PRIORIDADES)[number]);
-
-function int(value: unknown, campo: string, minimo: number): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < minimo) {
-    throw new DomainError(`${campo}: debe ser un entero ≥ ${minimo}`);
+function int(value: unknown, campo: string, minimo: number, maximo = Infinity): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimo || value > maximo) {
+    throw new DomainError(`${campo}: debe ser un entero entre ${minimo} y ${maximo}`);
   }
   return value;
 }
@@ -32,13 +25,15 @@ function str(value: unknown, campo: string): string {
   return value.trim();
 }
 
-const median = (xs: number[]) => {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
-
 const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
+
+/** P(X ≤ k) for X ~ Poisson(λ). */
+export function poissonCdf(k: number, lambda: number): number {
+  let term = Math.exp(-lambda);
+  let sum = term;
+  for (let i = 1; i <= k; i++) sum += (term *= lambda / i);
+  return sum;
+}
 
 async function one<T = Row>(q: Q, text: string, params: unknown[] = []): Promise<T | undefined> {
   return (await q.query<T>(text, params))[0];
@@ -51,179 +46,117 @@ const VENTAS_VALIDAS = `
 export class Stock {
   constructor(private db: Db) {}
 
-  // ---------- derived figures (F4) ----------
+  // ---------- periods (S2) ----------
 
-  /** Units of non-voided sales emitted at or after `desde`.
-   * Same-second sales count as after the count: the shelf is underestimated, never overestimated. */
-  private async vendidoDesde(q: Q, s: string, p: string, desde: string): Promise<number> {
-    return (await one(q, `SELECT COALESCE(SUM(l.cantidad), 0)::int AS n ${VENTAS_VALIDAS} AND v.emitido_at >= $3`, [s, p, desde]))!.n;
+  async config(q: Q, s: string): Promise<Row> {
+    const cfg = await one(q, "SELECT * FROM sucursal WHERE id = $1", [s]);
+    if (!cfg) throw new NotFoundError(`sucursal ${s} inexistente`);
+    return cfg;
   }
+
+  /** The round period `now` falls in: business hours split into `pasadas_por_dia` equal parts. null = store closed. */
+  periodo(cfg: Row, now: Date): Periodo | null {
+    const abre = plus(startOfDay(now), cfg.apertura * HOUR).getTime();
+    const largo = ((cfg.cierre - cfg.apertura) * HOUR) / cfg.pasadas_por_dia;
+    const i = Math.floor((now.getTime() - abre) / largo);
+    if (i < 0 || i >= cfg.pasadas_por_dia) return null;
+    return { n: i + 1, de: cfg.pasadas_por_dia, inicio: iso(new Date(abre + i * largo)), fin: iso(new Date(abre + (i + 1) * largo)) };
+  }
+
+  // ---------- figures (S4) ----------
 
   private async ventasEntre(q: Q, s: string, p: string, desde: Date, hasta: Date): Promise<number> {
     return (await one(q, `SELECT COALESCE(SUM(l.cantidad), 0)::int AS n ${VENTAS_VALIDAS}
       AND v.emitido_at >= $3 AND v.emitido_at < $4`, [s, p, iso(desde), iso(hasta)]))!.n;
   }
 
-  /** Average units/hour for this weekday+hour over the last 4 weeks, skipping hours with an
-   * empty shelf (censored demand). null = no history before today. */
-  async ventaHoraFranja(q: Q, s: string, p: string, now: Date): Promise<number | null> {
-    const hoy = startOfDay(now);
+  /** Average units sold in [ini, fin) on the same weekday over the last 4 weeks, skipping weeks with a
+   * stock-out inside the `censura` window, the whole period by default (censored demand). null = no sales history before today. */
+  async promedio(q: Q, s: string, p: string, ini: Date, fin: Date, censura = { ini, fin }): Promise<number | null> {
+    const hoy = startOfDay(ini);
     if (!(await this.ventasEntre(q, s, p, plus(hoy, -SEMANAS * WEEK), hoy))) return null;
-    const hora = startOfHour(now);
     const muestras: number[] = [];
     for (let k = 1; k <= SEMANAS; k++) {
-      const ini = plus(hora, -k * WEEK);
-      const fin = plus(ini, HOUR);
-      const vacio = await one(q, `SELECT 1 FROM vacio_periodo WHERE sucursal_id = $1 AND producto_id = $2
-        AND desde < $3 AND (hasta IS NULL OR hasta > $4)`, [s, p, iso(fin), iso(ini)]);
-      if (!vacio) muestras.push(await this.ventasEntre(q, s, p, ini, fin));
+      const quiebre = await one(q, `SELECT 1 FROM vacio_periodo WHERE sucursal_id = $1 AND producto_id = $2
+        AND desde < $3 AND (hasta IS NULL OR hasta > $4)`, [s, p, iso(plus(censura.fin, -k * WEEK)), iso(plus(censura.ini, -k * WEEK))]);
+      if (!quiebre) muestras.push(await this.ventasEntre(q, s, p, plus(ini, -k * WEEK), plus(fin, -k * WEEK)));
     }
     return muestras.length ? muestras.reduce((a, b) => a + b, 0) / muestras.length : null;
   }
 
-  async tiempoRespuestaH(q: Q, s: string, now: Date): Promise<number> {
-    const rows = await q.query(`SELECT creada_at, atendida_at FROM alerta
-      WHERE sucursal_id = $1 AND tipo = 'REPONER' AND estado = 'ATENDIDA'
-        AND atendida_por IS NOT NULL AND atendida_at >= $2`, [s, iso(plus(now, -7 * 24 * HOUR))]);
-    if (!rows.length) return RESPUESTA_DEFAULT_H;
-    return median(rows.map((r) => (fromIso(r.atendida_at).getTime() - fromIso(r.creada_at).getTime()) / HOUR));
-  }
-
-  static umbral(item: Row, ventaHora: number | null, respuestaH: number): number {
-    const minimo = item.minimo_exhibicion;
-    if (ventaHora === null) return item.capacidad ? Math.max(minimo, Math.ceil(item.capacidad * 0.25)) : minimo;
-    const horas = respuestaH + item.tiempo_reposicion_min / 60;
-    // round() before ceil() avoids 2.0000000001 -> 3 from float noise.
-    return Math.max(minimo, Math.ceil(round(ventaHora * horas + SEGURIDAD, 6)));
-  }
-
-  async snapshot(q: Q, s: string, p: string, now: Date): Promise<Snapshot> {
-    const item = await one(q, `SELECT g.*, COALESCE(pr.nombre, g.producto_id) AS nombre,
-        COALESCE(pr.precio, 0)::float8 AS precio, sg.unidades AS stock_general
-      FROM gondola_item g
-      LEFT JOIN producto pr ON pr.id = g.producto_id
-      LEFT JOIN stock_general sg ON sg.sucursal_id = g.sucursal_id AND sg.producto_id = g.producto_id
+  async snapshot(q: Q, s: string, p: string, now: Date): Promise<Row> {
+    const item = await one(q, `SELECT g.producto_id, COALESCE(pr.nombre, g.producto_id) AS nombre, COALESCE(pr.precio, 0)::float8 AS precio
+      FROM gondola_item g LEFT JOIN producto pr ON pr.id = g.producto_id
       WHERE g.sucursal_id = $1 AND g.producto_id = $2`, [s, p]);
     if (!item) throw new NotFoundError(`producto ${p} no está en la góndola de ${s}`);
-    const contado = item.conteo_at !== null;
-    const informado: number = item.conteo_informado ?? 0;
-    const vendido = contado ? await this.vendidoDesde(q, s, p, item.conteo_at) : 0;
-    const stock = Math.max(0, informado - vendido);
-    const vendidoHoy = await this.ventasEntre(q, s, p, startOfDay(now), plus(now, 1000));
-    const deposito = Math.max(0, (item.stock_general ?? 0) - vendidoHoy - stock);
-    const vh = await this.ventaHoraFranja(q, s, p, now);
-    const umbral = Stock.umbral(item, vh, await this.tiempoRespuestaH(q, s, now));
-    const cap: number | null = item.capacidad;
-    const ultima = (await one(q, `SELECT MAX(v.emitido_at) AS t ${VENTAS_VALIDAS}`, [s, p]))!.t;
-
-    const estado = !contado ? "SIN_CONTEO"
-      : stock === 0 ? "VACIO"
-      : stock <= umbral && deposito === 0 ? "SIN_DEPOSITO"
-      : stock <= umbral ? "BAJO"
-      : "OK";
-
+    const per = this.periodo(await this.config(q, s), now);
+    let umbral: number | null = null;
+    let esperado: number | null = null;
+    let vendidoPeriodo = 0;
+    if (per) {
+      const ini = fromIso(per.inicio);
+      const fin = fromIso(per.fin);
+      umbral = await this.promedio(q, s, p, ini, fin);
+      // Expected so far = what used to sell in the same elapsed window, so intra-period peaks are respected.
+      esperado = umbral === null ? null : await this.promedio(q, s, p, ini, now, { ini, fin });
+      vendidoPeriodo = await this.ventasEntre(q, s, p, ini, plus(now, 1000));
+    }
+    const quiebre = await one(q, "SELECT desde FROM vacio_periodo WHERE sucursal_id = $1 AND producto_id = $2 AND hasta IS NULL", [s, p]);
+    const anomalia = await one(q, "SELECT 1 FROM alerta WHERE sucursal_id = $1 AND producto_id = $2 AND tipo = 'VENTA_ANOMALA' AND estado = 'ABIERTA'", [s, p]);
     return {
       sucursal_id: s,
-      producto_id: p,
-      nombre: item.nombre,
-      precio: item.precio,
-      capacidad: cap,
-      tiempo_reposicion_min: item.tiempo_reposicion_min,
-      conteo_informado: item.conteo_informado,
-      conteo_at: item.conteo_at,
-      conteo_por: item.conteo_por,
-      conteo_vencido: contado && now.getTime() - fromIso(item.conteo_at).getTime() > CONTEO_VENCE_H * HOUR,
-      vendido_desde_conteo: vendido,
-      stock_gondola: stock,
-      desvio: contado ? Math.max(0, vendido - informado) : 0,
-      nivel: informado ? Math.round((stock * 100) / informado) : 0,
-      stock_general: item.stock_general,
-      vendido_hoy: vendidoHoy,
-      deposito,
-      venta_hora: vh !== null ? round(vh, 2) : null,
-      umbral,
-      horas_a_vacio: vh ? round(stock / vh, 1) : null,
-      a_reponer: cap ? Math.max(0, Math.min(cap - stock, deposito)) : deposito,
-      ultima_venta_at: ultima,
-      estado,
-      estado_anterior: item.estado,
+      ...item,
+      periodo: per,
+      umbral: umbral === null ? null : round(umbral, 1),
+      esperado: esperado === null ? null : round(esperado, 1),
+      vendido_periodo: vendidoPeriodo,
+      vendido_hoy: await this.ventasEntre(q, s, p, startOfDay(now), plus(now, 1000)),
+      ultima_venta_at: (await one(q, `SELECT MAX(v.emitido_at) AS t ${VENTAS_VALIDAS}`, [s, p]))!.t,
+      quiebre_desde: quiebre?.desde ?? null,
+      estado: quiebre ? "QUIEBRE" : anomalia ? "ANOMALIA" : "OK",
     };
   }
 
-  /** R3: a fast mover with stock on the shelf that stopped selling. */
-  private silencioImprobable(snap: Snapshot, now: Date): boolean {
-    const vh = snap.venta_hora;
-    if (!vh || vh < ALTA_ROTACION_UH || snap.stock_gondola === 0) return false;
-    const desde = [snap.conteo_at, snap.ultima_venta_at].filter(Boolean).sort().at(-1)!;
-    const horas = (now.getTime() - fromIso(desde).getTime()) / HOUR;
-    // ponytail: Poisson with the current hour's rate; integrate per-hour rates if false alarms show up.
-    return Math.exp(-vh * horas) < P_SILENCIO;
+  // ---------- alerts ----------
+
+  private async abrir(q: Q, s: string, p: string | null, tipo: string, prioridad: string, destinatario: string, ahora: string, extra: Row = {}): Promise<Evento> {
+    const row = (await one(q, `INSERT INTO alerta (sucursal_id, producto_id, tipo, prioridad, destinatario, creada_at)
+      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`, [s, p, tipo, prioridad, destinatario, ahora]))!;
+    return { type: "alerta.creada", sucursal_id: s, data: { ...row, ...extra } };
   }
 
-  // ---------- alerts (F5) ----------
-
-  private alertasDeseadas(snap: Snapshot, now: Date): Map<string, [string, string, number | null]> {
-    const quiere = new Map<string, [string, string, number | null]>();
-    if (snap.conteo_at === null) return quiere.set("RECONTAR", ["BAJA", "REPOSITOR", null]);
-    if (snap.conteo_vencido) quiere.set("RECONTAR", ["BAJA", "REPOSITOR", null]);
-    if (snap.stock_gondola <= snap.umbral) {
-      if (snap.deposito > 0) quiere.set("REPONER", [snap.stock_gondola === 0 ? "URGENTE" : "ALTA", "REPOSITOR", snap.a_reponer]);
-      else quiere.set("SIN_DEPOSITO", ["ALTA", "ENCARGADO", null]);
-    }
-    if (snap.desvio > 0 || this.silencioImprobable(snap, now)) quiere.set("VERIFICAR", ["MEDIA", "REPOSITOR", null]);
-    return quiere;
+  /** Closes the open alerts of these types for a product; returns their events. */
+  private async cerrar(q: Q, s: string, p: string, tipos: string[], ahora: string, por: string | null, motivo: string | null): Promise<Evento[]> {
+    const rows = await q.query(`UPDATE alerta SET estado = 'ATENDIDA', atendida_at = $1, atendida_por = $2, motivo = $3
+      WHERE sucursal_id = $4 AND producto_id = $5 AND estado = 'ABIERTA' AND tipo = ANY($6) RETURNING id, tipo`, [ahora, por, motivo, s, p, tipos]);
+    return rows.map((r) => ({ type: "alerta.cerrada", sucursal_id: s, data: { id: r.id, tipo: r.tipo, producto_id: p } }));
   }
 
-  private alertaDict(row: Row, snap: Snapshot): Row {
-    return { ...row, nombre: snap.nombre, stock_gondola: snap.stock_gondola, conteo_informado: snap.conteo_informado };
-  }
-
-  /** Recompute state and alerts for one product. Must run inside a transaction. */
-  async evaluar(q: Q, s: string, p: string, now: Date, siempre = true): Promise<Evento[]> {
-    const snap = await this.snapshot(q, s, p, now);
-    const eventos: Evento[] = [];
-    const cambio = snap.estado !== snap.estado_anterior;
+  /** S3 + S5 for one branch: one RONDA per period, one VENTA_ANOMALA per product per period. */
+  private async evaluarSucursal(q: Q, s: string, now: Date): Promise<Evento[]> {
+    const per = this.periodo(await this.config(q, s), now);
+    if (!per) return [];
     const ahora = iso(now);
+    const eventos: Evento[] = [];
 
-    if (cambio) {
-      await q.query("UPDATE gondola_item SET estado = $1 WHERE sucursal_id = $2 AND producto_id = $3", [snap.estado, s, p]);
-      if (snap.estado_anterior === "VACIO") {
-        await q.query("UPDATE vacio_periodo SET hasta = $1 WHERE sucursal_id = $2 AND producto_id = $3 AND hasta IS NULL", [ahora, s, p]);
-      }
-      if (snap.estado === "VACIO") {
-        await q.query("INSERT INTO vacio_periodo (sucursal_id, producto_id, desde) VALUES ($1, $2, $3)", [s, p, ahora]);
-      }
+    if (!(await one(q, "SELECT 1 FROM alerta WHERE sucursal_id = $1 AND tipo = 'RONDA' AND creada_at >= $2", [s, per.inicio]))) {
+      const viejas = await q.query(`UPDATE alerta SET estado = 'DESCARTADA', atendida_at = $1, motivo = 'pasada no realizada'
+        WHERE sucursal_id = $2 AND tipo = 'RONDA' AND estado = 'ABIERTA' RETURNING id`, [ahora, s]);
+      for (const r of viejas) eventos.push({ type: "alerta.cerrada", sucursal_id: s, data: { id: r.id, tipo: "RONDA", producto_id: null } });
+      eventos.push(await this.abrir(q, s, null, "RONDA", "MEDIA", "REPOSITOR", ahora, { periodo: per }));
     }
 
-    const quiere = this.alertasDeseadas(snap, now);
-    const abiertas = new Map((await q.query(
-      "SELECT * FROM alerta WHERE sucursal_id = $1 AND producto_id = $2 AND estado = 'ABIERTA'", [s, p])).map((r) => [r.tipo, r]));
-
-    for (const [tipo, row] of abiertas) {
-      if (!quiere.has(tipo)) {
-        await q.query("UPDATE alerta SET estado = 'ATENDIDA', atendida_at = $1, motivo = 'resuelta automáticamente' WHERE id = $2", [ahora, row.id]);
-        eventos.push({ type: "alerta.cerrada", sucursal_id: s, data: { id: row.id, tipo, producto_id: p } });
+    for (const { producto_id: p } of await q.query("SELECT producto_id FROM gondola_item WHERE sucursal_id = $1 ORDER BY producto_id", [s])) {
+      const ya = await one(q, `SELECT 1 FROM alerta WHERE sucursal_id = $1 AND producto_id = $2 AND tipo = 'VENTA_ANOMALA'
+        AND (creada_at >= $3 OR estado = 'ABIERTA')`, [s, p, per.inicio]);
+      if (ya) continue;
+      const snap = await this.snapshot(q, s, p, now);
+      if (snap.estado === "QUIEBRE" || !snap.esperado) continue;
+      // ponytail: Poisson assumes independent sales; tune P_ANOMALIA if bulk buyers cause false alarms.
+      if (poissonCdf(snap.vendido_periodo, snap.esperado) < P_ANOMALIA) {
+        eventos.push(await this.abrir(q, s, p, "VENTA_ANOMALA", "ALTA", "REPOSITOR", ahora,
+          { nombre: snap.nombre, esperado: snap.esperado, vendido_periodo: snap.vendido_periodo }));
       }
-    }
-
-    for (const [tipo, [prioridad, dest, unidades]] of quiere) {
-      const row = abiertas.get(tipo);
-      if (!row) {
-        const nueva = (await one(q, `INSERT INTO alerta (sucursal_id, producto_id, tipo, prioridad, destinatario, unidades_sugeridas, creada_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [s, p, tipo, prioridad, dest, unidades, ahora]))!;
-        eventos.push({ type: "alerta.creada", sucursal_id: s, data: this.alertaDict(nueva, snap) });
-      } else if (prio(prioridad) < prio(row.prioridad)) {
-        // Escalation (ALTA -> URGENTE) notifies again.
-        const esc = (await one(q, "UPDATE alerta SET prioridad = $1, unidades_sugeridas = $2 WHERE id = $3 RETURNING *", [prioridad, unidades, row.id]))!;
-        eventos.push({ type: "alerta.creada", sucursal_id: s, data: { ...this.alertaDict(esc, snap), escalada: true } });
-      } else if (row.unidades_sugeridas !== unidades || row.prioridad !== prioridad) {
-        await q.query("UPDATE alerta SET prioridad = $1, unidades_sugeridas = $2 WHERE id = $3", [prioridad, unidades, row.id]);
-      }
-    }
-
-    if (siempre || cambio || eventos.length) {
-      snap.estado_anterior = snap.estado;
-      eventos.unshift({ type: "producto.actualizado", sucursal_id: s, data: snap });
     }
     return eventos;
   }
@@ -233,49 +166,48 @@ export class Stock {
     return q.query("SELECT pg_advisory_xact_lock(hashtext($1))", [s]);
   }
 
-  private alta(q: Q, s: string, p: string) {
-    return q.query("INSERT INTO gondola_item (sucursal_id, producto_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [s, p]);
-  }
-
   // ---------- commands ----------
 
-  /** RF-01. */
-  async registrarConteo(s: string, body: Row, now: Date): Promise<{ result: Row; eventos: Evento[] }> {
+  /** S2: the encargado sets rounds per day and business hours. */
+  async configurar(s: string, body: Row): Promise<Row> {
+    return this.db.tx(async (q) => {
+      const cfg = { ...(await this.config(q, s)) };
+      if (body.pasadas_por_dia !== undefined) cfg.pasadas_por_dia = int(body.pasadas_por_dia, "pasadas_por_dia", 1, 24);
+      if (body.apertura !== undefined) cfg.apertura = int(body.apertura, "apertura", 0, 23);
+      if (body.cierre !== undefined) cfg.cierre = int(body.cierre, "cierre", 1, 24);
+      if (cfg.cierre <= cfg.apertura) throw new DomainError("cierre: debe ser posterior a la apertura");
+      return (await one(q, "UPDATE sucursal SET pasadas_por_dia = $1, apertura = $2, cierre = $3 WHERE id = $4 RETURNING *",
+        [cfg.pasadas_por_dia, cfg.apertura, cfg.cierre, s]))!;
+    });
+  }
+
+  /** S6: the repositor reports a product. OK = shelf fine; REPUSE = it was empty and got restocked;
+   * SIN_STOCK = empty and nothing in the back room (stays open, escalates to the encargado). */
+  async reportar(s: string, body: Row, now: Date): Promise<{ result: Row; eventos: Evento[] }> {
     const p = str(body.producto_id, "producto_id");
     const repositor = str(body.repositor_id, "repositor_id");
-    const unidades = int(body.unidades, "unidades", 0);
-    const tipo = body.tipo ?? "REPOSICION";
-    if (!TIPOS_CONTEO.has(tipo)) throw new DomainError(`tipo: debe ser uno de ${[...TIPOS_CONTEO].sort().join(", ")}`);
-    // created_at from the device keeps offline counts in order (RNF-04).
-    let at = body.created_at ? parseTs(body.created_at, "created_at") : now;
-    if (at > now) at = now;
+    const resultado = body.resultado;
+    if (!RESULTADOS.includes(resultado)) throw new DomainError(`resultado: debe ser uno de ${RESULTADOS.join(", ")}`);
+    const ahora = iso(now);
 
     return this.db.tx(async (q) => {
       await this.lock(q, s);
-      await this.alta(q, s, p);
-      const item = (await one(q, "SELECT * FROM gondola_item WHERE sucursal_id = $1 AND producto_id = $2", [s, p]))!;
-      if (item.capacidad && unidades > item.capacidad && !body.confirmar_capacidad) {
-        throw new ConflictError(`¿Superás la capacidad de ${item.capacidad}? Confirmá el conteo.`);
+      const snap = await this.snapshot(q, s, p, now);
+      const eventos = await this.cerrar(q, s, p, ["VENTA_ANOMALA"], ahora, repositor, resultado);
+      // The shelf emptied with its last sale: nobody can buy what is not there.
+      const desde = snap.ultima_venta_at ?? ahora;
+      if (resultado === "REPUSE") {
+        const abierto = await q.query("UPDATE vacio_periodo SET hasta = $1 WHERE sucursal_id = $2 AND producto_id = $3 AND hasta IS NULL RETURNING 1",
+          [ahora, s, p]);
+        if (!abierto.length) await q.query("INSERT INTO vacio_periodo (sucursal_id, producto_id, desde, hasta) VALUES ($1, $2, $3, $4)", [s, p, desde, ahora]);
+        eventos.push(...(await this.cerrar(q, s, p, ["SIN_STOCK"], ahora, repositor, "repuesto")));
+      } else if (resultado === "SIN_STOCK" && !snap.quiebre_desde) {
+        await q.query("INSERT INTO vacio_periodo (sucursal_id, producto_id, desde) VALUES ($1, $2, $3)", [s, p, desde]);
+        eventos.push(await this.abrir(q, s, p, "SIN_STOCK", "ALTA", "ENCARGADO", ahora, { nombre: snap.nombre, atendida_por: repositor }));
       }
-      const esperado: number | null = item.conteo_at ? (await this.snapshot(q, s, p, at)).stock_gondola : null;
-      const diferencia = esperado === null ? null : unidades - esperado;
-      await q.query(`INSERT INTO conteo (sucursal_id, producto_id, repositor_id, unidades, esperado, diferencia, tipo, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [s, p, repositor, unidades, esperado, diferencia, tipo, iso(at)]);
-
-      if (item.conteo_at && iso(at) <= item.conteo_at) {
-        // An older offline count arriving late: keep it as history only.
-        return { result: { aplicado: false, esperado }, eventos: [] };
-      }
-      await q.query(`UPDATE gondola_item SET conteo_informado = $1, conteo_at = $2, conteo_por = $3,
-          capacidad = COALESCE(capacidad, NULLIF($1, 0)) WHERE sucursal_id = $4 AND producto_id = $5`,
-        [unidades, iso(at), repositor, s, p]);
-      const eventos: Evento[] = [];
-      const cerradas = await q.query(`UPDATE alerta SET estado = 'ATENDIDA', atendida_at = $1, atendida_por = $2
-        WHERE sucursal_id = $3 AND producto_id = $4 AND estado = 'ABIERTA' AND tipo IN (${CIERRA_AL_CONTAR}) RETURNING id, tipo`,
-        [iso(now), repositor, s, p]);
-      for (const r of cerradas) eventos.push({ type: "alerta.cerrada", sucursal_id: s, data: { id: r.id, tipo: r.tipo, producto_id: p } });
-      eventos.push(...(await this.evaluar(q, s, p, now)));
-      return { result: { aplicado: true, esperado, diferencia, producto: productos(eventos) }, eventos };
+      const producto = await this.snapshot(q, s, p, now);
+      eventos.push({ type: "producto.actualizado", sucursal_id: s, data: producto });
+      return { result: { producto }, eventos };
     });
   }
 
@@ -285,7 +217,7 @@ export class Stock {
       [comprobanteId, l.linea, l.producto_id, l.cantidad]);
   }
 
-  /** RF-02. */
+  /** Receives one POS receipt (or a void), idempotent by comprobante_id. */
   async registrarVenta(body: Row, now: Date): Promise<{ status: number; result: Row; eventos: Evento[] }> {
     const cid = str(body.comprobante_id, "comprobante_id");
     const s = str(body.sucursal_id, "sucursal_id");
@@ -317,55 +249,63 @@ export class Stock {
       // Checked under the lock so two concurrent retries of one receipt apply once.
       const previa = await one(q, "SELECT * FROM venta WHERE comprobante_id = $1", [cid]);
       if (previa) return { status: 200, result: { duplicado: true, venta: previa }, eventos: [] };
+      await q.query("INSERT INTO sucursal (id) VALUES ($1) ON CONFLICT DO NOTHING", [s]);
       await q.query(`INSERT INTO venta (comprobante_id, sucursal_id, tipo, comprobante_ref, emitido_at, procesada_at)
         VALUES ($1, $2, $3, $4, $5, $6)`, [cid, s, tipo, tipo === "ANULACION" ? ref : null, emitido, iso(now)]);
+      const eventos: Evento[] = [];
       let afectados: string[];
       if (tipo === "VENTA") {
         for (const l of lineas) await this.insertLinea(q, cid, l);
-        afectados = [...new Set(lineas.map((l) => l.producto_id))];
+        afectados = [...new Set(lineas.map((l) => l.producto_id))].sort();
+        for (const p of afectados) {
+          await q.query("INSERT INTO gondola_item (sucursal_id, producto_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [s, p]);
+          // Someone bought it, so the shelf is no longer empty.
+          const cerrado = await q.query(`UPDATE vacio_periodo SET hasta = GREATEST(desde, $1)
+            WHERE sucursal_id = $2 AND producto_id = $3 AND hasta IS NULL RETURNING 1`, [emitido, s, p]);
+          if (cerrado.length) eventos.push(...(await this.cerrar(q, s, p, ["SIN_STOCK"], iso(now), null, "volvió a venderse")));
+        }
       } else {
         const original = await one(q, "SELECT * FROM venta WHERE comprobante_id = $1 AND tipo = 'VENTA'", [ref]);
         if (!original || original.sucursal_id !== s) throw new DomainError(`comprobante_ref: la venta ${ref} no existe en ${s}`);
         if (original.anulada_por) throw new DomainError(`comprobante_ref: la venta ${ref} ya fue anulada`);
         await q.query("UPDATE venta SET anulada_por = $1 WHERE comprobante_id = $2", [cid, ref]);
-        afectados = (await q.query("SELECT DISTINCT producto_id FROM venta_linea WHERE comprobante_id = $1", [ref])).map((r) => r.producto_id);
+        afectados = (await q.query("SELECT DISTINCT producto_id FROM venta_linea WHERE comprobante_id = $1 ORDER BY 1", [ref])).map((r) => r.producto_id);
       }
-      const eventos: Evento[] = [];
-      for (const p of afectados.sort()) {
-        await this.alta(q, s, p); // unknown product: registered as "sin conteo"
-        eventos.push(...(await this.evaluar(q, s, p, now)));
+      const productos: Row[] = [];
+      for (const p of afectados) {
+        const snap = await this.snapshot(q, s, p, now);
+        productos.push(snap);
+        eventos.push({ type: "producto.actualizado", sucursal_id: s, data: snap });
       }
-      return { status: 201, result: { duplicado: false, comprobante_id: cid, productos: productos(eventos) }, eventos };
+      return { status: 201, result: { duplicado: false, comprobante_id: cid, productos }, eventos };
     });
   }
 
-  async descartarAlerta(id: number, body: Row, now: Date): Promise<{ result: Row; eventos: Evento[] }> {
-    const motivo = str(body.motivo, "motivo");
+  /** Closes an open alert: `estado: "ATENDIDA"` marks it done (a finished round); otherwise it is dismissed with a reason. */
+  async cerrarAlerta(id: number, body: Row, now: Date): Promise<{ result: Row; eventos: Evento[] }> {
+    const atendida = body.estado === "ATENDIDA";
+    const motivo = atendida ? (body.motivo ?? null) : str(body.motivo, "motivo");
+    const estado = atendida ? "ATENDIDA" : "DESCARTADA";
     return this.db.tx(async (q) => {
       const row = await one(q, "SELECT * FROM alerta WHERE id = $1 FOR UPDATE", [id]);
       if (!row) throw new NotFoundError("alerta inexistente");
       if (row.estado !== "ABIERTA") throw new ConflictError("la alerta ya está cerrada");
-      await q.query("UPDATE alerta SET estado = 'DESCARTADA', atendida_at = $1, atendida_por = $2, motivo = $3 WHERE id = $4",
-        [iso(now), body.por ?? null, motivo, id]);
+      await q.query("UPDATE alerta SET estado = $1, atendida_at = $2, atendida_por = $3, motivo = $4 WHERE id = $5",
+        [estado, iso(now), body.por ?? null, motivo, id]);
       return {
-        result: { id, estado: "DESCARTADA" },
+        result: { id, estado },
         eventos: [{ type: "alerta.cerrada", sucursal_id: row.sucursal_id, data: { id, tipo: row.tipo, producto_id: row.producto_id } }],
       };
     });
   }
 
-  /** Periodic re-evaluation: hour-slot thresholds, stale counts and silence (R3). One transaction per branch. */
+  /** Every minute: opens rounds and checks sales anomalies. One transaction per branch. */
   async tick(now: Date): Promise<Evento[]> {
     const eventos: Evento[] = [];
-    const sucursales = (await this.db.query("SELECT DISTINCT sucursal_id FROM gondola_item")).map((r) => r.sucursal_id);
-    for (const s of sucursales) {
+    for (const s of await this.sucursales()) {
       eventos.push(...(await this.db.tx(async (q) => {
         await this.lock(q, s);
-        const out: Evento[] = [];
-        for (const r of await q.query("SELECT producto_id FROM gondola_item WHERE sucursal_id = $1", [s])) {
-          out.push(...(await this.evaluar(q, s, r.producto_id, now, false)));
-        }
-        return out;
+        return this.evaluarSucursal(q, s, now);
       })));
     }
     return eventos;
@@ -373,48 +313,39 @@ export class Stock {
 
   // ---------- queries ----------
 
+  sucursal(s: string): Promise<Row> {
+    return this.config(this.db, s);
+  }
+
   async sucursales(): Promise<string[]> {
-    return (await this.db.query("SELECT DISTINCT sucursal_id FROM gondola_item ORDER BY 1")).map((r) => r.sucursal_id);
+    return (await this.db.query("SELECT id FROM sucursal ORDER BY 1")).map((r) => r.id);
   }
 
   async productos(s: string, now: Date): Promise<Row[]> {
-    const q = this.db;
-    const ids = (await q.query("SELECT producto_id FROM gondola_item WHERE sucursal_id = $1 ORDER BY producto_id", [s])).map((r) => r.producto_id);
+    const ids = (await this.db.query("SELECT producto_id FROM gondola_item WHERE sucursal_id = $1 ORDER BY producto_id", [s])).map((r) => r.producto_id);
     const abiertas = await this.alertas(s);
     const out: Row[] = [];
-    for (const p of ids) {
-      const snap: Row = await this.snapshot(q, s, p, now);
-      snap.alertas = abiertas.filter((a) => a.producto_id === p);
-      snap.desvio_hoy = (await one(q, `SELECT COALESCE(SUM(-diferencia), 0)::int AS n FROM conteo
-        WHERE sucursal_id = $1 AND producto_id = $2 AND diferencia < 0 AND created_at >= $3`, [s, p, iso(startOfDay(now))]))!.n;
-      out.push(snap);
-    }
+    for (const p of ids) out.push({ ...(await this.snapshot(this.db, s, p, now)), alertas: abiertas.filter((a) => a.producto_id === p) });
     return out;
   }
 
   async alertas(s: string, destinatario?: string | null): Promise<Row[]> {
-    return destinatario
-      ? this.db.query("SELECT * FROM alerta WHERE sucursal_id = $1 AND estado = 'ABIERTA' AND destinatario = $2 ORDER BY id", [s, destinatario])
-      : this.db.query("SELECT * FROM alerta WHERE sucursal_id = $1 AND estado = 'ABIERTA' ORDER BY id", [s]);
+    const rows = destinatario
+      ? await this.db.query("SELECT * FROM alerta WHERE sucursal_id = $1 AND estado = 'ABIERTA' AND destinatario = $2 ORDER BY id", [s, destinatario])
+      : await this.db.query("SELECT * FROM alerta WHERE sucursal_id = $1 AND estado = 'ABIERTA' ORDER BY id", [s]);
+    const nombres = new Map((await this.db.query("SELECT id, nombre FROM producto")).map((r) => [r.id, r.nombre]));
+    return rows.map((a) => ({ ...a, nombre: a.producto_id ? nombres.get(a.producto_id) ?? a.producto_id : null }));
   }
 
-  /** RF-05: repositor work list, ordered by priority, hours to empty, value. */
-  async reposicion(s: string, now: Date): Promise<{ items: Row[]; total_minutos: number }> {
-    const items: Row[] = [];
-    for (const a of await this.alertas(s, "REPOSITOR")) {
-      const snap = await this.snapshot(this.db, s, a.producto_id, now);
-      items.push({
-        ...a,
-        estado_producto: snap.estado,
-        ...Object.fromEntries(["nombre", "precio", "stock_gondola", "conteo_informado", "nivel", "capacidad", "horas_a_vacio",
-          "tiempo_reposicion_min", "conteo_at", "conteo_por", "deposito"].map((k) => [k, snap[k]])),
-      });
-    }
-    const vacio = (i: Row) => i.horas_a_vacio ?? (i.stock_gondola === 0 ? 0 : Infinity);
-    items.sort((a, b) => prio(a.prioridad) - prio(b.prioridad) || vacio(a) - vacio(b) || b.precio - a.precio);
-    const total = items.filter((i) => i.tipo === "REPONER").reduce((t, i) => t + i.tiempo_reposicion_min, 0);
-    return { items, total_minutos: total };
+  /** Repositor screen: the branch config, current period, its open round and the alerts to answer. */
+  async ronda(s: string, now: Date): Promise<Row> {
+    const sucursal = await this.config(this.db, s);
+    const alertas = await this.alertas(s, "REPOSITOR");
+    return {
+      sucursal,
+      periodo: this.periodo(sucursal, now),
+      ronda: alertas.find((a) => a.tipo === "RONDA") ?? null,
+      alertas: alertas.filter((a) => a.tipo !== "RONDA"),
+    };
   }
 }
-
-export const productos = (eventos: Evento[]) => eventos.filter((e) => e.type === "producto.actualizado").map((e) => e.data);

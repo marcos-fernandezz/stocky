@@ -6,11 +6,11 @@ import { businessNow } from "@/lib/time";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-/** Dismiss an open alert with a reason. */
+/** Close an open alert: `{estado: "ATENDIDA", por}` marks it done, `{motivo, por}` dismisses it. */
 export const PATCH = (req: Request, { params }: Ctx) => handle(async () => {
   const id = Number((await params).id);
   if (!Number.isInteger(id) || id <= 0) throw new NotFoundError("alerta inexistente");
-  const { result, eventos } = await getStock().descartarAlerta(id, await readJson(req), businessNow());
+  const { result, eventos } = await getStock().cerrarAlerta(id, await readJson(req), businessNow());
   await publish(eventos);
   return NextResponse.json(result);
 });

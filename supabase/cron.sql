@@ -1,4 +1,4 @@
--- Every minute, Supabase calls the app's periodic re-evaluation (hour-slot thresholds, stale counts, R3).
+-- Every minute, Supabase calls the app's periodic re-evaluation (opens rounds, checks sales anomalies).
 -- Vercel Cron on the Hobby plan runs at most once a day, so the schedule lives in the database.
 -- Replace <APP_URL> with the PRODUCTION domain (preview URLs are behind Vercel Authentication)
 -- and <CRON_SECRET> with the same value set in Vercel. Run in Supabase → SQL Editor.
