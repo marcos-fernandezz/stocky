@@ -39,7 +39,9 @@ h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spa
 .name { font-weight: 700; font-size: 18px; }
 .muted { color: var(--muted); font-size: 14px; }
 .num { font-variant-numeric: tabular-nums; }
-.dejar { text-align: right; line-height: 1.1; }
+.row.producto { flex-wrap: nowrap; align-items: flex-start; }
+.row.producto > :first-child { min-width: 0; }
+.dejar { flex: none; text-align: right; line-height: 1.1; }
 .dejar b { display: block; font-size: 28px; font-variant-numeric: tabular-nums; }
 .ritmo { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
 .ritmo > i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
@@ -85,3 +87,6 @@ td button { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 6px
   background: var(--card); color: var(--ink); cursor: pointer; }
 input[type=search] { font: inherit; width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--card); color: var(--ink); }
+@media (pointer: coarse) {
+  header select, header button, header input, .chips button, td button { min-height: 44px; min-width: 44px; }
+}

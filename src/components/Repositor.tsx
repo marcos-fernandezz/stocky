@@ -190,7 +190,7 @@ export default function Repositor() {
         <div style={{ marginTop: 10 }}>
           {todos.length ? todos.map((p) => (
             <div className={`card${p.estado === "QUIEBRE" ? " SIN_STOCK" : ""}`} key={p.producto_id}>
-              <div className="row">
+              <div className="row producto">
                 <span>
                   <span className="name">{p.nombre}</span>{" "}
                   {p.estado !== "OK" ? <span className={`badge ${p.estado}`}>{ESTADO_LABEL[p.estado]}</span> : null}
