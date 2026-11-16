@@ -23,12 +23,9 @@ h2 { font-size: 16px; color: var(--muted); text-transform: uppercase; letter-spa
 .name { font-weight: 700; font-size: 18px; }
 .muted { color: var(--muted); font-size: 14px; }
 .badge { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 99px; color: #fff; background: var(--baja); }
-.badge.URGENTE, .badge.VACIO { background: var(--urgente); } .badge.ALTA, .badge.BAJO { background: var(--alta); }
+.badge.URGENTE, .badge.QUIEBRE { background: var(--urgente); } .badge.ALTA, .badge.ANOMALIA { background: var(--alta); }
 .badge.MEDIA { background: var(--media); } .badge.OK { background: var(--ok); }
-.badge.SIN_DEPOSITO { background: #6a1b9a; } .badge.SIN_CONTEO { background: var(--baja); }
-.bar { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 8px 0; }
-.bar > i { display: block; height: 100%; background: var(--ok); }
-.bar.low > i { background: var(--alta); } .bar.zero > i { background: var(--urgente); }
+.badge.SIN_STOCK { background: #6a1b9a; }
 button.big, a.big { font: inherit; font-weight: 700; padding: 12px 18px; border-radius: 10px; border: 0; background: var(--brand);
   color: #fff; min-height: 48px; cursor: pointer; text-decoration: none; display: inline-block; }
 button.ghost { background: transparent; color: var(--brand); border: 1px solid var(--line); }

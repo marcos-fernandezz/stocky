@@ -1,23 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { StockEvent } from "@/lib/realtime-client";
 import {
-  api, Dot, hhmm, load, NivelBar, nowIso, save, SucursalSelect, sucPath, useLive, useSucursal, useToast,
-  type ItemReposicion, type Producto,
+  api, Dot, hhmm, load, periodoTexto, save, SucursalSelect, sucPath, useLive, useSucursal, useToast,
+  type Alerta, type Producto, type Resultado, type Ronda,
 } from "./shared";
 
-const PRIO_AVISO = new Set(["URGENTE", "ALTA"]);
+type Reporte = { producto_id: string; resultado: Resultado; repositor_id: string };
+type Pendiente = { suc: string; body: Reporte };
 
-type Conteo = {
-  producto_id: string;
-  unidades: number;
-  repositor_id: string;
-  tipo: "REPOSICION";
-  created_at: string;
-  confirmar_capacidad?: boolean;
-};
-type Pendiente = { suc: string; body: Conteo };
+const TEXTO: Record<Resultado, string> = { OK: "Góndola OK", REPUSE: "Quiebre repuesto", SIN_STOCK: "Sin stock: avisamos al encargado" };
 
 function beep() {
   try {
@@ -33,19 +26,14 @@ function beep() {
 export default function Repositor() {
   const { sucursales, suc, select } = useSucursal();
   const { toast, node: toastNode } = useToast();
-  const [items, setItems] = useState<ItemReposicion[]>([]);
-  const [totalMin, setTotalMin] = useState(0);
+  const [ronda, setRonda] = useState<Ronda | null>(null);
   const [productos, setProductos] = useState<Producto[]>([]);
   const [buscar, setBuscar] = useState("");
   const [quien, setQuien] = useState("");
   const [notif, setNotif] = useState("🔔 Activar avisos");
   const [pendientes, setPendientes] = useState("");
-  const [actual, setActual] = useState<Producto | null>(null);
-  const [unidades, setUnidades] = useState("");
-  const dlg = useRef<HTMLDialogElement>(null);
-  const input = useRef<HTMLInputElement>(null);
 
-  // Name recorded on every count (RNF-07). No auth in the MVP.
+  // Name recorded on every report. No auth in the MVP.
   useEffect(() => {
     setQuien(load<string>("repositor") || "");
     if ("Notification" in window && Notification.permission === "granted") setNotif("🔔 Avisos activos");
@@ -55,51 +43,46 @@ export default function Repositor() {
   const cargar = useCallback(async () => {
     if (!suc) return;
     try {
-      const [rep, prods] = await Promise.all([
-        api<{ items: ItemReposicion[]; total_minutos: number }>("GET", `${sucPath(suc)}/reposicion`),
+      const [r, prods] = await Promise.all([
+        api<Ronda>("GET", `${sucPath(suc)}/ronda`),
         api<Producto[]>("GET", `${sucPath(suc)}/productos`),
       ]);
+      setRonda(r.data && "sucursal" in r.data ? r.data : null);
       setProductos(Array.isArray(prods.data) ? prods.data : []);
-      setItems(rep.data?.items || []);
-      setTotalMin(rep.data?.total_minutos ?? 0);
     } catch {} // offline: keep the last data on screen
   }, [suc]);
 
-  // ---------- alerts (RF-04) ----------
-  const avisar = (a: ItemReposicion) => {
-    const texto = `${a.prioridad} · ${a.nombre} (${suc}) · quedan ${a.stock_gondola} de ${a.conteo_informado ?? "?"}` +
-      (a.unidades_sugeridas ? ` · reponer ${a.unidades_sugeridas} u.` : "");
+  // ---------- notifications ----------
+  const avisar = (a: Alerta) => {
+    const texto = a.tipo === "RONDA" ? `Hora de la pasada (${suc})` : `Revisá la góndola: ${a.nombre ?? a.producto_id} vende menos de lo esperado`;
     toast(texto);
     beep();
     navigator.vibrate?.([200, 100, 200]);
     if ("Notification" in window && Notification.permission === "granted") {
-      // `renotify` is valid in browsers but missing from TS's NotificationOptions.
-      new Notification("Stocky · reponer", {
-        body: texto, tag: `alerta-${a.id}`, renotify: true, requireInteraction: a.prioridad === "URGENTE",
-      } as NotificationOptions);
+      new Notification("Stocky", { body: texto, tag: `alerta-${a.id}` });
     }
   };
 
   const onEvent = (e: StockEvent) => {
-    const a = e.data as unknown as ItemReposicion;
-    if (e.type === "alerta.creada" && a.destinatario === "REPOSITOR" && PRIO_AVISO.has(a.prioridad)) avisar(a);
+    const a = e.data as unknown as Alerta;
+    if (e.type === "alerta.creada" && a.destinatario === "REPOSITOR") avisar(a);
   };
 
   const connected = useLive(suc, cargar, onEvent);
 
-  // ---------- offline queue (RNF-04) ----------
+  // ---------- offline queue ----------
   const vaciarCola = useCallback(async () => {
-    const cola = load<Pendiente[]>("cola") || [];
+    const cola = load<Pendiente[]>("cola-reportes") || [];
     if (!cola.length) return;
-    save("cola", []);
+    save("cola-reportes", []);
     for (const { suc: s, body } of cola) {
       try {
-        await api("POST", `${sucPath(s)}/conteos`, { ...body, confirmar_capacidad: true });
+        await api("POST", `${sucPath(s)}/reportes`, body);
       } catch {
-        save("cola", [...(load<Pendiente[]>("cola") || []), { suc: s, body }]);
+        save("cola-reportes", [...(load<Pendiente[]>("cola-reportes") || []), { suc: s, body }]);
       }
     }
-    setPendientes((load<Pendiente[]>("cola") || []).length ? "Conteos pendientes de envío" : "");
+    setPendientes((load<Pendiente[]>("cola-reportes") || []).length ? "Reportes pendientes de envío" : "");
   }, []);
 
   useEffect(() => {
@@ -110,36 +93,30 @@ export default function Repositor() {
     return () => removeEventListener("online", vaciarCola);
   }, [vaciarCola]);
 
-  // ---------- count (RF-01: tap "Repuse" -> confirm number -> save) ----------
-  const abrirConteo = (pid: string, sugerido: number | null) => {
-    const p = productos.find((x) => x.producto_id === pid);
-    if (!p) return;
-    setActual(p);
-    setUnidades(String(sugerido != null ? Math.min(sugerido, p.capacidad ?? sugerido) : p.stock_gondola));
-    dlg.current?.showModal();
-    requestAnimationFrame(() => input.current?.select());
-  };
-
-  const enviarConteo = async (body: Conteo): Promise<void> => {
+  // ---------- actions ----------
+  const reportar = async (producto_id: string, resultado: Resultado) => {
+    const body: Reporte = { producto_id, resultado, repositor_id: repositor() };
     try {
-      const r = await api<{ error?: string }>("POST", `${sucPath(suc)}/conteos`, body);
-      if (r.status === 409 && confirm(r.data?.error || "")) return enviarConteo({ ...body, confirmar_capacidad: true });
+      const r = await api<{ error?: string }>("POST", `${sucPath(suc)}/reportes`, body);
       if (r.status >= 400) return toast(r.data?.error || "Error al guardar");
-      toast(`Conteo guardado: ${body.unidades} u.`, "var(--ok)");
+      toast(TEXTO[resultado], resultado === "SIN_STOCK" ? "var(--alta)" : "var(--ok)");
+      cargar();
     } catch {
-      // Offline (RNF-04): queue with the device time and retry later.
-      save("cola", [...(load<Pendiente[]>("cola") || []), { suc, body }]);
-      toast("Sin conexión: el conteo se enviará al reconectar", "var(--alta)");
+      save("cola-reportes", [...(load<Pendiente[]>("cola-reportes") || []), { suc, body }]);
+      setPendientes("Reportes pendientes de envío");
+      toast("Sin conexión: el reporte se enviará al reconectar", "var(--alta)");
     }
   };
 
-  const onSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    const n = Number(unidades);
-    if (unidades.trim() === "" || !Number.isInteger(n) || n < 0) return toast("Ingresá un número entero ≥ 0");
-    dlg.current?.close();
-    if (!actual) return;
-    enviarConteo({ producto_id: actual.producto_id, unidades: n, repositor_id: repositor(), tipo: "REPOSICION", created_at: nowIso() });
+  const terminarPasada = async (id: Alerta["id"]) => {
+    try {
+      const r = await api<{ error?: string }>("PATCH", `/api/alertas/${id}`, { estado: "ATENDIDA", por: repositor() });
+      if (r.status >= 400) return toast(r.data?.error || "Error");
+      toast("Pasada registrada", "var(--ok)");
+      cargar();
+    } catch {
+      toast("Sin conexión", "var(--alta)");
+    }
   };
 
   const pedirAvisos = async () => {
@@ -148,6 +125,7 @@ export default function Repositor() {
     setNotif(p === "granted" ? "🔔 Avisos activos" : "🔕 Avisos bloqueados");
   };
 
+  const porId = Object.fromEntries(productos.map((p) => [p.producto_id, p]));
   const f = buscar.trim().toLowerCase();
   const todos = productos.filter((p) => !f || p.nombre.toLowerCase().includes(f) || p.producto_id.toLowerCase().includes(f));
 
@@ -169,11 +147,38 @@ export default function Repositor() {
       </header>
       <main>
         <div className="row">
-          <h2>Reponer ahora</h2>
-          <span className="muted">{items.length ? `Total: ${totalMin} min` : ""}</span>
+          <h2>{periodoTexto(ronda?.periodo ?? null)}</h2>
         </div>
+        {ronda?.ronda ? (
+          <div className="card MEDIA">
+            <div className="row">
+              <span>
+                <b>Hacé la pasada</b>
+                <br />
+                <span className="muted">Dejá en cada góndola al menos lo que se vende en este período y marcá los quiebres que encuentres.</span>
+              </span>
+              <button type="button" className="big" onClick={() => terminarPasada(ronda.ronda!.id)}>Terminé la pasada</button>
+            </div>
+          </div>
+        ) : ronda?.periodo ? <div className="empty">✅ Pasada hecha</div> : null}
+
+        <h2>Revisar góndola</h2>
         <div>
-          {items.length ? items.map((i) => <Tarjeta key={i.id} i={i} onContar={abrirConteo} />) : <div className="empty">✅ Nada para reponer</div>}
+          {ronda?.alertas.length ? ronda.alertas.map((a) => {
+            const p = a.producto_id ? porId[a.producto_id] : undefined;
+            return (
+              <div className={`card ${a.prioridad}`} key={a.id}>
+                <div className="row">
+                  <span className="name">{a.nombre ?? a.producto_id}</span>
+                  <span className={`badge ${a.prioridad}`}>{a.prioridad}</span>
+                </div>
+                <p className="muted" style={{ margin: "4px 0" }}>
+                  Vende menos de lo esperado{p ? `: se esperaban ~${p.esperado ?? "?"} y se vendieron ${p.vendido_periodo}` : ""} (desde {hhmm(a.creada_at)})
+                </p>
+                <Acciones pid={a.producto_id!} ok onReportar={reportar} />
+              </div>
+            );
+          }) : <div className="empty">✅ Nada para revisar</div>}
         </div>
         <p className="muted">{pendientes}</p>
 
@@ -184,75 +189,35 @@ export default function Repositor() {
             <div className="card" key={p.producto_id}>
               <div className="row">
                 <span className="name">{p.nombre}</span>
-                <span className={`badge ${p.estado}`}>{p.estado.replace("_", " ")}</span>
+                <span className={`badge ${p.estado}`}>{p.estado}</span>
               </div>
               <div className="row">
-                <span>{p.stock_gondola} de {p.conteo_informado ?? "?"} · {p.nivel}%</span>
-                <button type="button" className="big ghost" onClick={() => abrirConteo(p.producto_id, null)}>Contar</button>
+                <span>
+                  {p.umbral != null ? <>Dejá al menos <b>{Math.ceil(p.umbral)}</b> · </> : null}
+                  vendidos {p.vendido_periodo}{p.umbral != null ? ` de ~${p.umbral}` : ""}
+                  {p.quiebre_desde ? <span className="muted"> · sin stock desde {hhmm(p.quiebre_desde)}</span> : null}
+                </span>
               </div>
-              <NivelBar item={p} />
+              {p.estado === "QUIEBRE" ? (
+                <div className="row"><span /><button type="button" className="big" onClick={() => reportar(p.producto_id, "REPUSE")}>Repuse</button></div>
+              ) : (
+                <Acciones pid={p.producto_id} onReportar={reportar} />
+              )}
             </div>
           )) : <div className="empty">Sin resultados</div>}
         </div>
       </main>
-
-      <dialog ref={dlg}>
-        <form onSubmit={onSubmit}>
-          <div className="name">{actual?.nombre}</div>
-          <div className="muted">{actual && `Capacidad ${actual.capacidad ?? "?"} · el sistema calcula ${actual.stock_gondola}`}</div>
-          <p style={{ margin: "12px 0 0" }}>¿Cuántas unidades hay ahora en la góndola?</p>
-          <div className="stepper">
-            <button type="button" aria-label="Restar uno" onClick={() => setUnidades((u) => String(Math.max(0, Number(u) - 1)))}>−</button>
-            <input
-              ref={input}
-              type="number"
-              min={0}
-              inputMode="numeric"
-              required
-              aria-label="Unidades en góndola"
-              value={unidades}
-              onChange={(e) => setUnidades(e.target.value)}
-            />
-            <button type="button" aria-label="Sumar uno" onClick={() => setUnidades((u) => String(Number(u) + 1))}>+</button>
-          </div>
-          <div className="row">
-            <button type="button" className="big ghost" onClick={() => dlg.current?.close()}>Cancelar</button>
-            <button type="submit" className="big">Guardar conteo</button>
-          </div>
-        </form>
-      </dialog>
       {toastNode}
     </>
   );
 }
 
-function Tarjeta({ i, onContar }: { i: ItemReposicion; onContar: (pid: string, sugerido: number | null) => void }) {
-  const titulo = { REPONER: `Reponer ${i.unidades_sugeridas} u. · ${i.tiempo_reposicion_min} min`, VERIFICAR: "Verificar góndola", RECONTAR: "Recontar" }[
-    i.tipo as "REPONER" | "VERIFICAR" | "RECONTAR"
-  ];
-  const vacia = i.stock_gondola === 0 ? "Góndola vacía" : i.horas_a_vacio != null ? `Se vacía en ~${i.horas_a_vacio} h` : "";
-  const reponer = i.tipo === "REPONER";
+function Acciones({ pid, ok, onReportar }: { pid: string; ok?: boolean; onReportar: (pid: string, r: Resultado) => void }) {
   return (
-    <div className={`card ${i.prioridad}`}>
-      <div className="row">
-        <span className="name">{i.nombre}</span>
-        <span className={`badge ${i.prioridad}`}>{i.prioridad}</span>
-      </div>
-      <div className="row">
-        <span><b>{i.stock_gondola} de {i.conteo_informado ?? "?"}</b> · {i.nivel}%</span>
-        <span className="muted">{vacia}</span>
-      </div>
-      <NivelBar item={i} />
-      <div className="row">
-        <span>
-          <b>{titulo}</b>
-          <br />
-          <span className="muted">Último conteo {hhmm(i.conteo_at)}{i.conteo_por ? ` · ${i.conteo_por}` : ""}</span>
-        </span>
-        <button type="button" className="big" onClick={() => onContar(i.producto_id, reponer ? i.stock_gondola + (i.unidades_sugeridas ?? 0) : null)}>
-          {reponer ? "Repuse" : "Contar"}
-        </button>
-      </div>
+    <div className="row" style={{ justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+      {ok ? <button type="button" className="big ghost" onClick={() => onReportar(pid, "OK")}>Estaba OK</button> : null}
+      <button type="button" className="big ghost" onClick={() => onReportar(pid, "REPUSE")}>Vacía · repuse</button>
+      <button type="button" className="big ghost" onClick={() => onReportar(pid, "SIN_STOCK")}>Sin stock</button>
     </div>
   );
 }

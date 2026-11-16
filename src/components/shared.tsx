@@ -6,11 +6,11 @@ import { subscribeSucursal, type StockEvent } from "@/lib/realtime-client";
 export type Alerta = {
   id: number | string;
   sucursal_id: string;
-  producto_id: string;
-  tipo: "REPONER" | "SIN_DEPOSITO" | "VERIFICAR" | "RECONTAR";
+  producto_id: string | null;
+  nombre: string | null;
+  tipo: "RONDA" | "VENTA_ANOMALA" | "SIN_STOCK";
   prioridad: "URGENTE" | "ALTA" | "MEDIA" | "BAJA";
   destinatario: "REPOSITOR" | "ENCARGADO";
-  unidades_sugeridas: number | null;
   creada_at: string;
   atendida_at: string | null;
   atendida_por: string | null;
@@ -18,48 +18,29 @@ export type Alerta = {
   estado: string;
 };
 
+export type Periodo = { n: number; de: number; inicio: string; fin: string };
+
+export type Sucursal = { id: string; pasadas_por_dia: number; apertura: number; cierre: number };
+
 export type Producto = {
   sucursal_id: string;
   producto_id: string;
   nombre: string;
   precio: number;
-  capacidad: number | null;
-  tiempo_reposicion_min: number;
-  conteo_informado: number | null;
-  conteo_at: string | null;
-  conteo_por: string | null;
-  conteo_vencido: boolean;
-  vendido_desde_conteo: number;
-  stock_gondola: number;
-  desvio: number;
-  nivel: number;
-  stock_general: number | null;
+  periodo: Periodo | null;
+  umbral: number | null;
+  esperado: number | null;
+  vendido_periodo: number;
   vendido_hoy: number;
-  deposito: number;
-  venta_hora: number | null;
-  umbral: number;
-  horas_a_vacio: number | null;
-  a_reponer: number;
   ultima_venta_at: string | null;
-  estado: string;
+  quiebre_desde: string | null;
+  estado: "OK" | "ANOMALIA" | "QUIEBRE";
   alertas: Alerta[];
-  desvio_hoy: number;
 };
 
-export type ItemReposicion = Alerta & {
-  estado_producto: string;
-  nombre: string;
-  precio: number;
-  stock_gondola: number;
-  conteo_informado: number | null;
-  nivel: number;
-  capacidad: number | null;
-  horas_a_vacio: number | null;
-  tiempo_reposicion_min: number;
-  conteo_at: string | null;
-  conteo_por: string | null;
-  deposito: number;
-};
+export type Ronda = { sucursal: Sucursal; periodo: Periodo | null; ronda: Alerta | null; alertas: Alerta[] };
+
+export type Resultado = "OK" | "REPUSE" | "SIN_STOCK";
 
 export const hhmm = (iso: string | null | undefined) => (iso ? iso.slice(11, 16) : "—");
 
@@ -104,17 +85,8 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
 
 export const sucPath = (suc: string) => `/api/sucursales/${encodeURIComponent(suc)}`;
 
-export function NivelBar({ item }: { item: { nivel: number | null; stock_gondola: number; estado?: string; estado_producto?: string } }) {
-  const pct = item.nivel ?? 0;
-  // Work-list items carry the alert's own `estado`, so prefer the product's.
-  const estado = item.estado_producto || item.estado;
-  const cls = item.stock_gondola === 0 ? "zero" : estado === "BAJO" || estado === "SIN_DEPOSITO" ? "low" : "";
-  return (
-    <div className={`bar ${cls}`} role="img" aria-label={`Nivel ${pct}%`}>
-      <i style={{ width: `${pct}%` }} />
-    </div>
-  );
-}
+/** "Pasada 1 de 3 · 08:00–12:00" */
+export const periodoTexto = (p: Periodo | null) => (p ? `Pasada ${p.n} de ${p.de} · ${hhmm(p.inicio)}–${hhmm(p.fin)}` : "Fuera de horario");
 
 /** Branch list + selection persisted in localStorage. */
 export function useSucursal() {

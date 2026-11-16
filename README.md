@@ -1,10 +1,13 @@
 # Stocky · stock en góndola y alertas de reposición
 
 MVP del Equipo 2 para el Desafío 02 del Hackatón Retail Chain 4.0 (caso Red Faro).
-Especificación: [`specs/spec-00-reposicion-gondola.md`](specs/spec-00-reposicion-gondola.md).
+Especificación vigente: [`specs/spec-01-rondas-por-periodo.md`](specs/spec-01-rondas-por-periodo.md)
+(reemplaza el modelo de stock estimado de [`spec-00`](specs/spec-00-reposicion-gondola.md)).
 
-El repositor informa cuántas unidades dejó en la góndola; cada comprobante de caja las descuenta;
-cuando un producto llega a su umbral (calculado por producto y franja horaria), el repositor recibe un aviso urgente.
+El encargado define cuántas **pasadas** por día hace el repositor; el horario se divide en períodos y en cada uno
+el repositor recibe un aviso de **ronda**. El **umbral** de cada producto es su promedio de ventas en ese período
+(últimas 4 semanas, mismo día). Si un producto vende mucho menos de lo esperado, se alerta para **revisar la góndola**.
+El repositor marca los quiebres: *Estaba OK*, *Vacía · repuse* o *Sin stock* (escala al encargado).
 
 **Stack:** Next.js 16 (App Router) en Vercel · Postgres de Supabase · Supabase Realtime (Broadcast) · `pg_cron`.
 
@@ -13,9 +16,9 @@ cuando un producto llega a su umbral (calculado por producto y franja horaria), 
 ### 1. Supabase
 1. Crear un proyecto.
 2. **SQL Editor** → ejecutar en orden:
-   - `supabase/migrations/0001_init.sql` (esquema)
+   - `supabase/migrations/0001_init.sql` y `supabase/migrations/0002_rondas.sql` (esquema)
    - `supabase/seed.sql` (datos del pizarrón: S1 Leche/Arroz/Agua/Carne · S2 Leche)
-   - `supabase/seed_history.sql` (opcional: 4 semanas de ventas sintéticas para que el umbral varíe por franja)
+   - `supabase/seed_history.sql` (opcional: 4 semanas de ventas sintéticas para que haya umbral por período)
 3. Anotar:
    - **Project Settings → Database → Connection string → Transaction pooler** (puerto 6543) → `DATABASE_URL`
    - **Project Settings → API** → URL, `anon` key y `service_role` key
@@ -36,8 +39,8 @@ cuando un producto llega a su umbral (calculado por producto y franja horaria), 
 
 ### 3. Revisión periódica cada minuto
 En Supabase → SQL Editor, ejecutar `supabase/cron.sql` reemplazando `<APP_URL>` por el dominio de **producción** de Vercel
-y `<CRON_SECRET>` por el mismo valor de Vercel. Detecta conteos vencidos, productos que dejaron de venderse (R3)
-y recalcula umbrales al cambiar de franja. Sin este paso, todo lo demás funciona igual.
+y `<CRON_SECRET>` por el mismo valor de Vercel. Abre la ronda de cada período y detecta ventas anómalas.
+Sin este paso no hay rondas ni alertas de venta anómala.
 
 ### Verificar
 - `https://<app>/repositor` en el celular y `https://<app>/encargado` en la compu.
@@ -50,30 +53,32 @@ y recalcula umbrales al cambiar de franja. Sin este paso, todo lo demás funcion
 npm install
 cp .env.example .env.local          # con las keys de Supabase, o:
 DATABASE_URL=pglite://memory npm run dev   # sin Supabase: Postgres en memoria con seed + historial
-npm test                            # 28 tests (dominio, rutas, tiempo real) sobre Postgres en proceso (PGlite)
+npm test                            # 26 tests (dominio, rutas, tiempo real) sobre Postgres en proceso (PGlite)
 npm run simulate -- --url http://localhost:3000 --sucursal S1 --cada 2   # caja simulada
 ```
 
 Con `pglite://memory` los datos viven mientras corre el proceso y no hay tiempo real (las pantallas se refrescan cada 30 s).
 Sirve también como plan B offline en el hackatón.
 
-## Guion de demo (spec-00 §12)
-1. Repositor: **Contar** Leche → 12.
-2. Encargado: −1 nueve veces → la leche queda "3 de 12", llega el aviso **ALTA**.
-3. −1 tres veces más → "0 de 12", el aviso escala a **URGENTE**.
-4. Repositor: **Repuse** → 12. La alerta se cierra y el nivel vuelve a 100%.
+## Guion de demo (spec-01)
+Con el historial cargado (`pglite://memory` lo trae) y el tick corriendo:
+1. Encargado: **Pasadas por día** = 3 → el período actual aparece como "Pasada N de 3".
+2. Repositor: llega el aviso **Hora de la pasada**; cada producto muestra "Dejá al menos N". **Terminé la pasada**.
+3. Sin ventas en el período, la leche (umbral ~8) aparece en **Revisar góndola**: "se esperaban ~5 y se vendieron 0".
+4. Repositor: **Sin stock** → el encargado recibe el aviso. Encargado: −1 de leche → la venta cierra el quiebre.
 
 ## API
 
 | Método | Ruta | Uso |
 |---|---|---|
-| `POST` | `/api/sucursales/{s}/conteos` | `{producto_id, unidades, repositor_id, tipo?, created_at?, confirmar_capacidad?}` |
+| `POST` | `/api/sucursales/{s}/reportes` | `{producto_id, resultado: OK\|REPUSE\|SIN_STOCK, repositor_id}` |
 | `POST` | `/api/ventas` | `{comprobante_id, sucursal_id, emitido_at, tipo?: VENTA\|ANULACION, comprobante_ref?, lineas:[{linea, producto_id, cantidad}]}` |
 | `GET` | `/api/sucursales` | Sucursales |
-| `GET` | `/api/sucursales/{s}/productos` | Estado, nivel, umbral, depósito y alertas por producto |
-| `GET` | `/api/sucursales/{s}/reposicion` | Lista priorizada + minutos totales |
+| `GET/PATCH` | `/api/sucursales/{s}` | Configuración: `{pasadas_por_dia, apertura, cierre}` |
+| `GET` | `/api/sucursales/{s}/productos` | Estado, umbral y esperado del período, vendido y alertas por producto |
+| `GET` | `/api/sucursales/{s}/ronda` | Período actual, ronda abierta y alertas para el repositor |
 | `GET` | `/api/sucursales/{s}/alertas?destinatario=` | Alertas abiertas |
-| `PATCH` | `/api/alertas/{id}` | Descartar con `{motivo}` |
+| `PATCH` | `/api/alertas/{id}` | `{estado: "ATENDIDA", por}` (pasada hecha) o descartar con `{motivo}` |
 | `GET/POST` | `/api/cron/tick` | Revisión periódica (`Authorization: Bearer $CRON_SECRET`) |
 
 Tiempo real: canal Broadcast `sucursal:<id>` con eventos `producto.actualizado`, `alerta.creada`, `alerta.cerrada`.
@@ -82,7 +87,7 @@ Horarios: ISO local de Argentina (`YYYY-MM-DDTHH:MM:SS`); los valores con zona h
 ## Estructura
 
 ```
-src/lib/stock.ts        dominio: conteos, ventas atómicas, umbral, estados y alertas
+src/lib/stock.ts        dominio: períodos, ventas atómicas, umbral, rondas, quiebres y alertas
 src/lib/db.ts           acceso a Postgres (Supabase) y PGlite (tests / modo local)
 src/lib/realtime.ts     publica eventos (servidor) · realtime-client.ts los escucha (navegador)
 src/app/api/**          rutas de la API
@@ -93,6 +98,6 @@ tests/                  vitest + PGlite
 
 ## Límites del MVP
 
-- **Sin autenticación:** cualquiera con la URL puede registrar conteos y ventas. Antes de usarlo con datos reales: login para repositores y una API key para la caja.
+- **Sin autenticación:** cualquiera con la URL puede registrar reportes, ventas y cambiar la configuración. Antes de usarlo con datos reales: login para repositores y una API key para la caja.
 - El aviso es una notificación del navegador (la pantalla del repositor debe estar abierta); push nativo queda para producción.
 - En producción, la caja de Red Faro debe enviar cada comprobante al emitirlo (hoy consolida a medianoche).

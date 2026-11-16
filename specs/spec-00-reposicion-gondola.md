@@ -3,6 +3,10 @@
 **Proyecto:** Stocky · Equipo 2 · Hackatón Retail Chain 4.0 (caso Red Faro)
 **Estado:** borrador para MVP · **Fecha:** 2026-11-16
 
+> **Reemplazada en parte por [spec-01](spec-01-rondas-por-periodo.md):** ya no se estima el stock en góndola ni en depósito,
+> no hay conteos y las alertas REPONER / SIN_DEPOSITO / RECONTAR / VERIFICAR se reemplazan por rondas por período y venta anómala.
+> Siguen vigentes la recepción de ventas (RF-02), los actores y los requisitos no funcionales.
+
 ---
 
 ## 1. Objetivo
