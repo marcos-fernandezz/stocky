@@ -6,10 +6,14 @@ import { Stock } from "./stock";
 let stock: Stock | null = null;
 export const getStock = () => (stock ??= new Stock(getDb()));
 
+const MAX_BODY = 1_000_000;
+
 export async function readJson(req: Request): Promise<Record<string, unknown>> {
+  const text = await req.text();
+  if (text.length > MAX_BODY) throw new DomainError("body demasiado grande");
   let body: unknown;
   try {
-    body = await req.json();
+    body = JSON.parse(text);
   } catch {
     throw new DomainError("JSON inválido");
   }

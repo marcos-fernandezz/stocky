@@ -50,7 +50,7 @@ y recalcula umbrales al cambiar de franja. Sin este paso, todo lo demás funcion
 npm install
 cp .env.example .env.local          # con las keys de Supabase, o:
 DATABASE_URL=pglite://memory npm run dev   # sin Supabase: Postgres en memoria con seed + historial
-npm test                            # 27 tests (dominio + rutas) sobre Postgres en proceso (PGlite)
+npm test                            # 28 tests (dominio, rutas, tiempo real) sobre Postgres en proceso (PGlite)
 npm run simulate -- --url http://localhost:3000 --sucursal S1 --cada 2   # caja simulada
 ```
 

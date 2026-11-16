@@ -54,6 +54,7 @@ describe("route handlers", () => {
     expect(err.error).toContain("capacidad de 12");
     expect((await postVenta(req({ comprobante_id: "X" }))).status).toBe(422);
     expect((await postVenta(new Request("http://x/", { method: "POST", body: "{nope" }))).status).toBe(422);
+    expect((await postVenta(new Request("http://x/", { method: "POST", body: " ".repeat(1_000_001) }))).status).toBe(422);
     expect((await patchAlerta(req({ motivo: "x" }), ctx({ id: "999" }))).status).toBe(404);
     expect((await patchAlerta(req({ motivo: "x" }), ctx({ id: "abc" }))).status).toBe(404);
   });

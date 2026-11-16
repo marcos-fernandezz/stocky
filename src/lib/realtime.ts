@@ -18,17 +18,21 @@ function getClient(): SupabaseClient | null {
  * screens also reload every 30 s.
  */
 export async function publish(eventos: Evento[]): Promise<void> {
-  const supabase = getClient();
-  if (!supabase || !eventos.length) return;
-  const porSucursal = Map.groupBy(eventos, (e) => e.sucursal_id);
-  await Promise.all([...porSucursal].map(async ([s, evs]) => {
-    const channel = supabase.channel(`sucursal:${s}`);
-    try {
-      for (const e of evs) await channel.httpSend(e.type, e.data);
-    } catch (err) {
-      console.error("realtime publish failed", s, err);
-    } finally {
-      await supabase.removeChannel(channel);
-    }
-  }));
+  try {
+    const supabase = getClient();
+    if (!supabase || !eventos.length) return;
+    const porSucursal = new Map<string, Evento[]>();
+    for (const e of eventos) porSucursal.set(e.sucursal_id, [...(porSucursal.get(e.sucursal_id) ?? []), e]);
+    await Promise.all([...porSucursal].map(async ([s, evs]) => {
+      const channel = supabase.channel(`sucursal:${s}`);
+      try {
+        for (const e of evs) await channel.httpSend(e.type, e.data);
+      } finally {
+        await supabase.removeChannel(channel).catch(() => {});
+      }
+    }));
+  } catch (err) {
+    // The write is already committed: never turn a broadcast problem into a failed request.
+    console.error("realtime publish failed", err);
+  }
 }
