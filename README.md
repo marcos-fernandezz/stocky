@@ -42,6 +42,13 @@ En Supabase → SQL Editor, ejecutar `supabase/cron.sql` reemplazando `<APP_URL>
 y `<CRON_SECRET>` por el mismo valor de Vercel. Abre la ronda de cada período y detecta ventas anómalas.
 Sin este paso no hay rondas ni alertas de venta anómala.
 
+### Alternativa: Neon en vez de Supabase
+Cualquier Postgres sirve. Con Neon (región São Paulo): cargar la cadena **pooled** (`-pooler`) como `DATABASE_URL`,
+correr `0001`, `0002` y los seeds en su SQL Editor, y llamar `GET /api/cron/tick` cada minuto desde un cron externo
+(p. ej. cron-job.org con `Authorization: Bearer <CRON_SECRET>`), porque Neon no trae `pg_cron` + `pg_net` como Supabase.
+Sin las variables de Supabase no hay tiempo real: las pantallas se refrescan cada 30 s.
+`vercel.json` fija las funciones en `gru1` (São Paulo), al lado de la base: cada pantalla hace muchas consultas cortas.
+
 ### Verificar
 - `https://<app>/repositor` en el celular y `https://<app>/encargado` en la compu.
 - El punto del encabezado se pone **verde** cuando el tiempo real está conectado.
