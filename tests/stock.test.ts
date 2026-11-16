@@ -168,6 +168,16 @@ describe("quiebre reports (S6)", () => {
     expect(await db.query("SELECT desde, hasta FROM vacio_periodo")).toEqual([{ desde: "2026-11-16T10:00:00", hasta: "2026-11-16T10:30:00" }]);
   });
 
+  it("a late receipt emitted before the report does not close the stock-out", async () => {
+    await vender("S1", [["ID-1", 1]], at("2026-11-16T09:00:00"));
+    await reportar("ID-1", "SIN_STOCK", T0);
+    // buffered POS receipt: emitted 09:30, arrives 10:05
+    await st.registrarVenta({ comprobante_id: "LATE", sucursal_id: "S1", emitido_at: "2026-11-16T09:30:00",
+      lineas: [{ linea: 1, producto_id: "ID-1", cantidad: 1 }] }, min(T0, 5));
+    expect(await db.query("SELECT desde, hasta FROM vacio_periodo")).toEqual([{ desde: "2026-11-16T09:30:00", hasta: null }]);
+    expect(await abiertas("S1", "ID-1")).toHaveProperty("SIN_STOCK");
+  });
+
   it("no anomaly alert while the stock-out is already known", async () => {
     await historia([7, 7, 7, 7]);
     await reportar("ID-1", "SIN_STOCK", at("2026-11-16T08:05:00"));
@@ -241,5 +251,18 @@ describe("history seed", () => {
     const s = await new Stock(h).snapshot(h, "S1", "ID-1", at(`${hoy}T11:59:00`));
     expect(s.umbral).toBeGreaterThan(5);
     expect(s.umbral).toBeLessThan(11);
+  });
+});
+
+describe("migration 0002", () => {
+  it("closes the empty-shelf periods the old estimate left open", async () => {
+    const { PGlite } = await import("@electric-sql/pglite");
+    const { readFile } = await import("node:fs/promises");
+    const pg = new PGlite();
+    const sql = (f: string) => readFile(`supabase/migrations/${f}`, "utf8");
+    await pg.exec(await sql("0001_init.sql"));
+    await pg.exec("INSERT INTO gondola_item (sucursal_id, producto_id) VALUES ('S1', 'ID-1'); INSERT INTO vacio_periodo VALUES ('S1', 'ID-1', '2026-11-10T09:00:00', NULL)");
+    await pg.exec(await sql("0002_rondas.sql"));
+    expect((await pg.query("SELECT COUNT(*)::int AS n FROM vacio_periodo WHERE hasta IS NULL")).rows).toEqual([{ n: 0 }]);
   });
 });

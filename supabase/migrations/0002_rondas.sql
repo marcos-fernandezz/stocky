@@ -29,3 +29,7 @@ alter table alerta alter column producto_id drop not null;
 alter table alerta drop column if exists unidades_sugeridas;
 
 -- vacio_periodo now holds the stock-outs (quiebres) the repositor reports; still excluded from the averages.
+-- Empty-shelf periods the old estimate left open were never confirmed by anyone: close them.
+update vacio_periodo set hasta = desde where hasta is null
+  and not exists (select 1 from alerta a where a.tipo = 'SIN_STOCK' and a.estado = 'ABIERTA'
+    and a.sucursal_id = vacio_periodo.sucursal_id and a.producto_id = vacio_periodo.producto_id);

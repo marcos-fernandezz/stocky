@@ -12,7 +12,7 @@ export default function Home() {
             <span>
               <span className="name">Repositor</span>
               <br />
-              <span className="muted">Lista de reposición en vivo, conteos y avisos urgentes. Abrir en el celular.</span>
+              <span className="muted">Avisos de pasada, góndolas a revisar y quiebres. Abrir en el celular.</span>
             </span>
             <Link href="/repositor" className="big">Abrir</Link>
           </div>

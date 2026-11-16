@@ -259,10 +259,18 @@ export class Stock {
         afectados = [...new Set(lineas.map((l) => l.producto_id))].sort();
         for (const p of afectados) {
           await q.query("INSERT INTO gondola_item (sucursal_id, producto_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [s, p]);
-          // Someone bought it, so the shelf is no longer empty.
-          const cerrado = await q.query(`UPDATE vacio_periodo SET hasta = GREATEST(desde, $1)
-            WHERE sucursal_id = $2 AND producto_id = $3 AND hasta IS NULL RETURNING 1`, [emitido, s, p]);
-          if (cerrado.length) eventos.push(...(await this.cerrar(q, s, p, ["SIN_STOCK"], iso(now), null, "volvió a venderse")));
+          const abierto = await one(q, `SELECT v.desde, COALESCE(MAX(a.creada_at), v.desde) AS reportado
+            FROM vacio_periodo v LEFT JOIN alerta a ON a.sucursal_id = v.sucursal_id AND a.producto_id = v.producto_id
+              AND a.tipo = 'SIN_STOCK' AND a.estado = 'ABIERTA'
+            WHERE v.sucursal_id = $1 AND v.producto_id = $2 AND v.hasta IS NULL GROUP BY v.desde`, [s, p]);
+          if (abierto && emitido >= abierto.reportado) {
+            // Sold after the stock-out was reported: the shelf is no longer empty.
+            await q.query("UPDATE vacio_periodo SET hasta = $1 WHERE sucursal_id = $2 AND producto_id = $3 AND hasta IS NULL", [emitido, s, p]);
+            eventos.push(...(await this.cerrar(q, s, p, ["SIN_STOCK"], iso(now), null, "volvió a venderse")));
+          } else if (abierto && emitido > abierto.desde) {
+            // A late receipt from before the report only proves the shelf emptied after it.
+            await q.query("UPDATE vacio_periodo SET desde = $1 WHERE sucursal_id = $2 AND producto_id = $3 AND hasta IS NULL", [emitido, s, p]);
+          }
         }
       } else {
         const original = await one(q, "SELECT * FROM venta WHERE comprobante_id = $1 AND tipo = 'VENTA'", [ref]);

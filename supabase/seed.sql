@@ -12,7 +12,7 @@ on conflict (sucursal_id, producto_id) do update set unidades = excluded.unidade
 
 -- S1: 3 rounds a day 08-20 h (08-12, 12-16, 16-20). S2: 2 rounds (08-14, 14-20).
 insert into sucursal (id, pasadas_por_dia, apertura, cierre) values ('S1', 3, 8, 20), ('S2', 2, 8, 20)
-on conflict (id) do nothing;
+on conflict (id) do update set pasadas_por_dia = excluded.pasadas_por_dia, apertura = excluded.apertura, cierre = excluded.cierre;
 
 insert into gondola_item (sucursal_id, producto_id) values
   ('S1', 'ID-1'), ('S1', 'ID-2'), ('S1', 'ID-3'), ('S1', 'ID-4'), ('S2', 'ID-1')
