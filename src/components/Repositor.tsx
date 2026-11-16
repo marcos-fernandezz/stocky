@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { StockEvent } from "@/lib/realtime-client";
 import {
-  api, Dot, hhmm, load, periodoTexto, save, SucursalSelect, sucPath, useLive, useSucursal, useToast,
+  api, cuando, Dot, ESTADO_LABEL, hhmm, Icono, load, num, periodoTexto, Ritmo, save, SucursalSelect, sucPath, useLive, useSucursal, useToast,
   type Alerta, type Producto, type Resultado, type Ronda,
 } from "./shared";
 
@@ -30,13 +30,13 @@ export default function Repositor() {
   const [productos, setProductos] = useState<Producto[]>([]);
   const [buscar, setBuscar] = useState("");
   const [quien, setQuien] = useState("");
-  const [notif, setNotif] = useState("🔔 Activar avisos");
+  const [notif, setNotif] = useState("Activar avisos");
   const [pendientes, setPendientes] = useState("");
 
   // Name recorded on every report. No auth in the MVP.
   useEffect(() => {
     setQuien(load<string>("repositor") || "");
-    if ("Notification" in window && Notification.permission === "granted") setNotif("🔔 Avisos activos");
+    if ("Notification" in window && Notification.permission === "granted") setNotif("Avisos activos");
   }, []);
   const repositor = () => quien.trim() || "repositor";
 
@@ -122,7 +122,7 @@ export default function Repositor() {
   const pedirAvisos = async () => {
     if (!("Notification" in window)) return toast("Este navegador no soporta notificaciones");
     const p = await Notification.requestPermission();
-    setNotif(p === "granted" ? "🔔 Avisos activos" : "🔕 Avisos bloqueados");
+    setNotif(p === "granted" ? "Avisos activos" : "Avisos bloqueados");
   };
 
   const porId = Object.fromEntries(productos.map((p) => [p.producto_id, p]));
@@ -139,28 +139,30 @@ export default function Repositor() {
           value={quien}
           onChange={(e) => setQuien(e.target.value)}
           onBlur={() => save("repositor", quien.trim())}
-          placeholder="Tu nombre"
+          placeholder="Tu nombre…"
           aria-label="Tu nombre"
-          style={{ font: "inherit", padding: "6px 10px", borderRadius: 8, border: 0, width: 130 }}
+          name="repositor"
+          autoComplete="given-name"
+          spellCheck={false}
         />
-        <button type="button" onClick={pedirAvisos}>{notif}</button>
+        <button type="button" onClick={pedirAvisos}><Icono nombre="campana" size={16} />{notif}</button>
       </header>
-      <main>
-        <div className="row">
-          <h2>{periodoTexto(ronda?.periodo ?? null)}</h2>
-        </div>
+      <main id="contenido">
+        <h2>{periodoTexto(ronda?.periodo ?? null)}</h2>
         {ronda?.ronda ? (
-          <div className="card MEDIA">
+          <div className="card ronda">
             <div className="row">
               <span>
-                <b>Hacé la pasada</b>
+                <span className="name">Hacé la pasada</span>
                 <br />
-                <span className="muted">Dejá en cada góndola al menos lo que se vende en este período y marcá los quiebres que encuentres.</span>
+                <span className="muted">Dejá en cada góndola al menos lo que indica la lista y marcá los quiebres que encuentres.</span>
               </span>
-              <button type="button" className="big" onClick={() => terminarPasada(ronda.ronda!.id)}>Terminé la pasada</button>
+              <button type="button" className="big" onClick={() => terminarPasada(ronda.ronda!.id)}>
+                <Icono nombre="check" />Terminé la pasada
+              </button>
             </div>
           </div>
-        ) : ronda?.periodo ? <div className="empty">✅ Pasada hecha</div> : null}
+        ) : ronda?.periodo ? <div className="empty"><Icono nombre="check" />Pasada hecha</div> : null}
 
         <h2>Revisar góndola</h2>
         <div>
@@ -170,38 +172,46 @@ export default function Repositor() {
               <div className={`card ${a.prioridad}`} key={a.id}>
                 <div className="row">
                   <span className="name">{a.nombre ?? a.producto_id}</span>
-                  <span className={`badge ${a.prioridad}`}>{a.prioridad}</span>
+                  <span className="badge ANOMALIA">Vende poco</span>
                 </div>
-                <p className="muted" style={{ margin: "4px 0" }}>
-                  Vende menos de lo esperado{p ? `: se esperaban ~${p.esperado ?? "?"} y se vendieron ${p.vendido_periodo}` : ""} (desde {hhmm(a.creada_at)})
-                </p>
+                <div className="muted">
+                  {p ? <>Se esperaban <b className="num">~{num(p.esperado)}</b> y se vendieron <b className="num">{p.vendido_periodo}</b>. </> : null}
+                  ¿Cómo está la góndola? (aviso de las {hhmm(a.creada_at)})
+                </div>
                 <Acciones pid={a.producto_id!} ok onReportar={reportar} />
               </div>
             );
-          }) : <div className="empty">✅ Nada para revisar</div>}
+          }) : <div className="empty"><Icono nombre="check" />Nada para revisar</div>}
         </div>
         <p className="muted">{pendientes}</p>
 
         <h2>Todos los productos</h2>
-        <input type="search" value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar producto o código…" aria-label="Buscar producto" />
+        <input type="search" name="buscar" autoComplete="off" value={buscar} onChange={(e) => setBuscar(e.target.value)} placeholder="Buscar producto o código…" aria-label="Buscar producto" />
         <div style={{ marginTop: 10 }}>
           {todos.length ? todos.map((p) => (
-            <div className="card" key={p.producto_id}>
-              <div className="row">
-                <span className="name">{p.nombre}</span>
-                <span className={`badge ${p.estado}`}>{p.estado}</span>
-              </div>
+            <div className={`card${p.estado === "QUIEBRE" ? " SIN_STOCK" : ""}`} key={p.producto_id}>
               <div className="row">
                 <span>
-                  {p.umbral != null ? <>Dejá al menos <b>{Math.ceil(p.umbral)}</b> · </> : null}
-                  vendidos {p.vendido_periodo}{p.umbral != null ? ` de ~${p.umbral}` : ""}
-                  {p.quiebre_desde ? <span className="muted"> · sin stock desde {hhmm(p.quiebre_desde)}</span> : null}
+                  <span className="name">{p.nombre}</span>{" "}
+                  {p.estado !== "OK" ? <span className={`badge ${p.estado}`}>{ESTADO_LABEL[p.estado]}</span> : null}
+                  <br />
+                  <span className="muted num">
+                    {p.quiebre_desde ? `Sin stock desde ${cuando(p.quiebre_desde)}`
+                      : p.umbral != null ? `Vendidos ${p.vendido_periodo} de ~${num(p.umbral)} en el período` : "Sin historial de ventas todavía"}
+                  </span>
                 </span>
+                {p.umbral != null && p.estado !== "QUIEBRE" ? (
+                  <span className="dejar"><span className="muted">Dejá al menos</span><b>{Math.ceil(p.umbral)}</b></span>
+                ) : null}
               </div>
+              <Ritmo p={p} />
               {p.estado === "QUIEBRE" ? (
-                <div className="row"><span /><button type="button" className="big" onClick={() => reportar(p.producto_id, "REPUSE")}>Repuse</button></div>
+                <div className="acciones"><button type="button" className="big" onClick={() => reportar(p.producto_id, "REPUSE")}>Ya repuse</button></div>
               ) : (
-                <Acciones pid={p.producto_id} onReportar={reportar} />
+                <details className="quiebre">
+                  <summary>Marcar quiebre</summary>
+                  <Acciones pid={p.producto_id} onReportar={reportar} />
+                </details>
               )}
             </div>
           )) : <div className="empty">Sin resultados</div>}
@@ -214,10 +224,10 @@ export default function Repositor() {
 
 function Acciones({ pid, ok, onReportar }: { pid: string; ok?: boolean; onReportar: (pid: string, r: Resultado) => void }) {
   return (
-    <div className="row" style={{ justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
-      {ok ? <button type="button" className="big ghost" onClick={() => onReportar(pid, "OK")}>Estaba OK</button> : null}
-      <button type="button" className="big ghost" onClick={() => onReportar(pid, "REPUSE")}>Vacía · repuse</button>
-      <button type="button" className="big ghost" onClick={() => onReportar(pid, "SIN_STOCK")}>Sin stock</button>
+    <div className="acciones">
+      {ok ? <button type="button" className="big ghost" onClick={() => onReportar(pid, "OK")}>Estaba bien</button> : null}
+      <button type="button" className="big ghost" onClick={() => onReportar(pid, "REPUSE")}>Estaba vacía, la repuse</button>
+      <button type="button" className="big ghost" onClick={() => onReportar(pid, "SIN_STOCK")}>No hay mercadería</button>
     </div>
   );
 }

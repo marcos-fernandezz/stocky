@@ -42,7 +42,18 @@ export type Ronda = { sucursal: Sucursal; periodo: Periodo | null; ronda: Alerta
 
 export type Resultado = "OK" | "REPUSE" | "SIN_STOCK";
 
-export const hhmm = (iso: string | null | undefined) => (iso ? iso.slice(11, 16) : "—");
+// Business times are naive wall-clock strings: format them as UTC so no device offset shifts them.
+const HORA = new Intl.DateTimeFormat("es-AR", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const DIA_HORA = new Intl.DateTimeFormat("es-AR", { timeZone: "UTC", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+
+export const hhmm = (iso: string | null | undefined) => (iso ? HORA.format(new Date(iso + "Z")) : "—");
+
+/** Time if it is today, otherwise day and time, so an old sale never reads as recent. */
+export const cuando = (iso: string | null | undefined) =>
+  !iso ? "—" : iso.slice(0, 10) === nowIso().slice(0, 10) ? hhmm(iso) : DIA_HORA.format(new Date(iso + "Z"));
+
+/** Argentine number format: 6.3 -> "6,3". */
+export const num = (x: number | null | undefined) => (x == null ? "—" : x.toLocaleString("es-AR"));
 
 /** Current business time in Argentina as a naive ISO string (YYYY-MM-DDTHH:MM:SS), independent of the device offset. */
 export function nowIso(): string {
@@ -84,6 +95,38 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
 }
 
 export const sucPath = (suc: string) => `/api/sucursales/${encodeURIComponent(suc)}`;
+
+/** Human labels for the enums the API returns. */
+export const ESTADO_LABEL: Record<Producto["estado"], string> = { OK: "OK", ANOMALIA: "Vende poco", QUIEBRE: "Sin stock" };
+export const TIPO_LABEL: Record<Alerta["tipo"], string> = { RONDA: "Pasada", VENTA_ANOMALA: "Vende poco", SIN_STOCK: "Sin stock" };
+
+const ICONOS = {
+  campana: "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0",
+  check: "M20 6 9 17l-5-5",
+  play: "M6 4l14 8-14 8z",
+  pausa: "M7 4h3v16H7zM14 4h3v16h-3z",
+} as const;
+
+/** Small stroke icon set (one family, 2px stroke). */
+export function Icono({ nombre, size = 18 }: { nombre: keyof typeof ICONOS; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={ICONOS[nombre]} />
+    </svg>
+  );
+}
+
+/** Sales pace in the current period: sold vs. the period average (umbral). */
+export function Ritmo({ p }: { p: Pick<Producto, "vendido_periodo" | "umbral" | "estado"> }) {
+  if (!p.umbral) return null;
+  const pct = Math.min(100, Math.round((p.vendido_periodo * 100) / p.umbral));
+  return (
+    <div className={`ritmo ${p.estado}`} role="img" aria-label={`Vendido ${p.vendido_periodo} de ${num(p.umbral)} esperados en el período`}>
+      <i style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
 
 /** "Pasada 1 de 3 · 08:00–12:00" */
 export const periodoTexto = (p: Periodo | null) => (p ? `Pasada ${p.n} de ${p.de} · ${hhmm(p.inicio)}–${hhmm(p.fin)}` : "Fuera de horario");
@@ -159,7 +202,8 @@ export function useLive(suc: string, reload: () => void, onEvent: (e: StockEvent
 }
 
 export function Dot({ on }: { on: boolean }) {
-  return <span className={`dot${on ? " on" : ""}`} title="Conexión en vivo" />;
+  const t = on ? "En vivo" : "Se actualiza cada 30 s";
+  return <span className={`dot${on ? " on" : ""}`} title={t} role="img" aria-label={t} />;
 }
 
 export function useToast() {
@@ -172,7 +216,7 @@ export function useToast() {
   }, []);
   useEffect(() => () => clearTimeout(timer.current), []);
   const node = (
-    <div id="toast" role="status" aria-live="assertive" style={{ display: state ? "block" : "none", background: state?.color || undefined }}>
+    <div id="toast" role="status" aria-live="polite" style={{ display: state ? "block" : "none", background: state?.color || undefined }}>
       {state?.msg}
     </div>
   );

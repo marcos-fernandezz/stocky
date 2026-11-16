@@ -3,15 +3,22 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { StockEvent } from "@/lib/realtime-client";
 import {
-  api, Dot, hhmm, nowIso, periodoTexto, SucursalSelect, sucPath, useLive, useSucursal, useToast, type Alerta, type Producto, type Sucursal,
+  api, cuando, Dot, ESTADO_LABEL, hhmm, Icono, nowIso, num, periodoTexto, Ritmo, SucursalSelect, sucPath, TIPO_LABEL, useLive, useSucursal, useToast,
+  type Alerta, type Producto, type Sucursal,
 } from "./shared";
 
-const ESTADOS = ["TODOS", "QUIEBRE", "ANOMALIA", "OK"];
+const ESTADOS = [["TODOS", "Todos"], ["QUIEBRE", "Sin stock"], ["ANOMALIA", "Vende poco"], ["OK", "OK"]] as const;
+
+/** 4 -> "4 h", 2.4 -> "2 h 24 min" */
+const horas = (h: number) => {
+  const min = Math.round(h * 60);
+  return `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ""}`;
+};
 
 export default function Encargado() {
   const { sucursales, suc, select } = useSucursal();
   const { toast, node: toastNode } = useToast();
-  const [filtro, setFiltro] = useState("TODOS");
+  const [filtro, setFiltro] = useState<string>("TODOS");
   const [productos, setProductos] = useState<Producto[]>([]);
   const [alertas, setAlertas] = useState<Alerta[]>([]);
   const [auto, setAuto] = useState(false);
@@ -88,38 +95,52 @@ export default function Encargado() {
         <h1>Estado de sucursal</h1>
         <SucursalSelect sucursales={sucursales} value={suc} onChange={select} />
       </header>
-      <main style={{ maxWidth: 1500 }}>
+      <main id="contenido" style={{ maxWidth: 1500 }}>
         <h2>Pasadas por día</h2>
         {cfg ? (
-          <form className="row" style={{ justifyContent: "flex-start", gap: 8, flexWrap: "wrap" }} onSubmit={guardarCfg}>
-            <label>Pasadas <input type="number" min={1} max={24} required value={cfg.pasadas_por_dia}
-              onChange={(e) => setCfg({ ...cfg, pasadas_por_dia: Number(e.target.value) })} style={{ width: 60 }} /></label>
-            <label>de <input type="number" min={0} max={23} required value={cfg.apertura}
-              onChange={(e) => setCfg({ ...cfg, apertura: Number(e.target.value) })} style={{ width: 60 }} /> h</label>
-            <label>a <input type="number" min={1} max={24} required value={cfg.cierre}
-              onChange={(e) => setCfg({ ...cfg, cierre: Number(e.target.value) })} style={{ width: 60 }} /> h</label>
-            <button type="submit">Guardar</button>
-            <span className="muted">{periodoTexto(productos[0]?.periodo ?? null)}</span>
+          <form className="card config" onSubmit={guardarCfg}>
+            <label>Pasadas
+              <input type="number" min={1} max={24} required name="pasadas_por_dia" inputMode="numeric" value={cfg.pasadas_por_dia}
+                onChange={(e) => setCfg({ ...cfg, pasadas_por_dia: Number(e.target.value) })} />
+            </label>
+            <label>Abre (h)
+              <input type="number" min={0} max={23} required name="apertura" inputMode="numeric" value={cfg.apertura}
+                onChange={(e) => setCfg({ ...cfg, apertura: Number(e.target.value) })} />
+            </label>
+            <label>Cierra (h)
+              <input type="number" min={1} max={24} required name="cierre" inputMode="numeric" value={cfg.cierre}
+                onChange={(e) => setCfg({ ...cfg, cierre: Number(e.target.value) })} />
+            </label>
+            <button type="submit" className="big small">Guardar</button>
+            <span className="muted">
+              {cfg.cierre > cfg.apertura && cfg.pasadas_por_dia > 0
+                ? `Una pasada cada ${horas((cfg.cierre - cfg.apertura) / cfg.pasadas_por_dia)} · ` : ""}
+              {periodoTexto(productos[0]?.periodo ?? null)}
+            </span>
           </form>
         ) : null}
 
         <h2>Alertas para el encargado</h2>
         <div>
           {alertas.length ? alertas.map((a) => (
-            <div className={`card ${a.prioridad}`} key={a.id}>
+            <div className={`card ${a.tipo}`} key={a.id}>
               <div className="row">
-                <span><b>{a.nombre ?? a.producto_id}</b> · sin mercadería: el repositor no pudo reponer (desde {hhmm(a.creada_at)})</span>
-                <span className={`badge ${a.prioridad}`}>{a.tipo.replace("_", " ")}</span>
+                <span>
+                  <span className="name">{a.nombre ?? a.producto_id}</span>
+                  <br />
+                  <span className="muted">La góndola está vacía y no hay mercadería para reponer. Avisado a las {hhmm(a.creada_at)}.</span>
+                </span>
+                <span className={`badge ${a.tipo}`}>{TIPO_LABEL[a.tipo]}</span>
               </div>
             </div>
-          )) : <div className="empty">Sin alertas</div>}
+          )) : <div className="empty"><Icono nombre="check" />Sin alertas</div>}
         </div>
 
         <h2>Productos</h2>
         <div className="chips">
-          {ESTADOS.map((e) => (
+          {ESTADOS.map(([e, label]) => (
             <button type="button" key={e} className={e === filtro ? "on" : ""} aria-pressed={e === filtro} onClick={() => setFiltro(e)}>
-              {e.replace("_", " ")}
+              {label}
             </button>
           ))}
         </div>
@@ -127,34 +148,40 @@ export default function Encargado() {
           <table>
             <thead>
               <tr>
-                <th>Producto</th><th>Estado</th><th>Umbral del período</th><th>Esperado hasta ahora</th><th>Vendido en el período</th>
-                <th>Vendido hoy</th><th>Última venta</th><th>Sin stock desde</th><th>Alertas</th>
-                <th>Simular caja</th>
+                <th>Producto</th><th>Estado</th><th>Este período</th><th>Hoy</th><th>Última venta</th><th>Alertas</th><th>Simular caja</th>
               </tr>
             </thead>
             <tbody>
               {filas.length ? filas.map((p) => (
                 <tr key={p.producto_id}>
                   <td><b>{p.nombre}</b><br /><span className="muted">{p.producto_id}</span></td>
-                  <td><span className={`badge ${p.estado}`}>{p.estado.replace("_", " ")}</span></td>
-                  <td>{p.umbral ?? "—"}</td>
-                  <td>{p.esperado ?? "—"}</td>
-                  <td>{p.vendido_periodo}</td>
+                  <td>
+                    <span className={`badge ${p.estado}`}>{ESTADO_LABEL[p.estado]}</span>
+                    {p.quiebre_desde ? <><br /><span className="muted">desde {cuando(p.quiebre_desde)}</span></> : null}
+                  </td>
+                  <td>
+                    {p.umbral != null ? (
+                      <>
+                        <b>{p.vendido_periodo}</b> de ~{num(p.umbral)}
+                        <span className="muted"> · esperado ahora {num(p.esperado)}</span>
+                        <Ritmo p={p} />
+                      </>
+                    ) : <span className="muted">Sin historial</span>}
+                  </td>
                   <td>{p.vendido_hoy}</td>
-                  <td>{hhmm(p.ultima_venta_at)}</td>
-                  <td>{hhmm(p.quiebre_desde)}</td>
+                  <td>{cuando(p.ultima_venta_at)}</td>
                   <td>
                     {p.alertas.map((a) => (
-                      <span key={a.id}><span className={`badge ${a.prioridad}`}>{a.tipo}</span> </span>
+                      <span key={a.id}><span className={`badge ${a.tipo}`}>{TIPO_LABEL[a.tipo]}</span> </span>
                     ))}
                   </td>
                   <td>
-                    <button type="button" onClick={() => vender(p.producto_id, 1)}>−1</button>{" "}
-                    <button type="button" onClick={() => vender(p.producto_id, 3)}>−3</button>
+                    <button type="button" onClick={() => vender(p.producto_id, 1)} aria-label={`Vender 1 ${p.nombre}`}>−1</button>{" "}
+                    <button type="button" onClick={() => vender(p.producto_id, 3)} aria-label={`Vender 3 ${p.nombre}`}>−3</button>
                   </td>
                 </tr>
               )) : (
-                <tr><td colSpan={10} className="empty">Sin productos en este estado</td></tr>
+                <tr><td colSpan={7} className="muted" style={{ textAlign: "center", padding: 24 }}>Sin productos en este estado</td></tr>
               )}
             </tbody>
           </table>
@@ -162,8 +189,10 @@ export default function Encargado() {
 
         <h2>Simulador de caja</h2>
         <div className="row" style={{ justifyContent: "flex-start" }}>
-          <button className="big" type="button" onClick={() => setAuto((a) => !a)}>{auto ? "⏸ Detener" : "▶ Venta automática"}</button>
-          <span className="muted">Emite un comprobante al azar cada 3 s (reemplaza al POS en la demo).</span>
+          <button className="big" type="button" onClick={() => setAuto((a) => !a)}>
+            <Icono nombre={auto ? "pausa" : "play"} />{auto ? "Detener" : "Venta automática"}
+          </button>
+          <span className="muted">Emite un comprobante al azar cada 3 s (reemplaza a la caja en la demo).</span>
         </div>
       </main>
       {toastNode}

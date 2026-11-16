@@ -4,9 +4,9 @@ export default function Home() {
   return (
     <>
       <header>
-        <h1>Stocky · stock en góndola</h1>
+        <h1>Stocky · reposición de góndolas</h1>
       </header>
-      <main>
+      <main id="contenido">
         <div className="card">
           <div className="row">
             <span>
@@ -22,7 +22,7 @@ export default function Home() {
             <span>
               <span className="name">Encargado</span>
               <br />
-              <span className="muted">Estado de la sucursal, alertas sin depósito y simulador de caja.</span>
+              <span className="muted">Pasadas por día, estado de la sucursal, avisos de sin stock y simulador de caja.</span>
             </span>
             <Link href="/encargado" className="big">Abrir</Link>
           </div>
