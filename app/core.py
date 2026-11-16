@@ -58,7 +58,8 @@ def _str(value, campo):
 class Stock:
     def __init__(self, conn):
         self.conn = conn
-        # ponytail: one global write lock; per-branch locks if a single process serves many stores.
+        # ponytail: one lock for the shared connection (reads and writes);
+        # a connection per thread + WAL if read concurrency ever matters.
         self.lock = threading.Lock()
 
     @contextmanager
@@ -81,12 +82,13 @@ class Stock:
     # ---------- derived figures (F4) ----------
 
     def _vendido_desde(self, s, p, desde):
-        """Units of non-voided sales emitted after `desde` (ISO string)."""
+        """Units of non-voided sales emitted at or after `desde` (ISO string).
+        Same-second sales count as after the count: the shelf is underestimated, never overestimated."""
         return self.q1(
             """SELECT COALESCE(SUM(l.cantidad), 0) FROM venta_linea l
                JOIN venta v USING (comprobante_id)
                WHERE v.tipo = 'VENTA' AND v.anulada_por IS NULL
-                 AND v.sucursal_id = ? AND l.producto_id = ? AND v.emitido_at > ?""",
+                 AND v.sucursal_id = ? AND l.producto_id = ? AND v.emitido_at >= ?""",
             s, p, desde)[0]
 
     def _ventas_entre(self, s, p, desde, hasta):
@@ -353,10 +355,6 @@ class Stock:
     def registrar_venta(self, body, now):
         """RF-02. Returns (http_status, result, events)."""
         cid = _str(body.get("comprobante_id"), "comprobante_id")
-        previa = self.q1("SELECT * FROM venta WHERE comprobante_id = ?", cid)
-        if previa is not None:
-            return 200, {"duplicado": True, "venta": dict(previa)}, []
-
         s = _str(body.get("sucursal_id"), "sucursal_id")
         tipo = body.get("tipo", "VENTA")
         emitido = iso(parse_dt(body.get("emitido_at"), "emitido_at"))
@@ -379,7 +377,7 @@ class Stock:
             raise DomainError("tipo: VENTA o ANULACION")
 
         with self.tx():
-            # Re-check inside the lock: two concurrent retries of the same receipt.
+            # Checked inside the lock so two concurrent retries of one receipt apply once.
             previa = self.q1("SELECT * FROM venta WHERE comprobante_id = ?", cid)
             if previa is not None:
                 return 200, {"duplicado": True, "venta": dict(previa)}, []

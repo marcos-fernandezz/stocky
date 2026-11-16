@@ -115,7 +115,7 @@ Cuando la caja emite un comprobante, el sistema registra la `venta` y, **en una 
 - **Idempotencia:** un `comprobante_id` ya procesado se ignora y responde `200` con el resultado original.
 - **Líneas repetidas:** si el mismo producto aparece en varias líneas, se suman antes de descontar.
 - **Anulación / devolución:** un comprobante `ANULACION` (sin líneas) anula **completa** la venta referenciada: sus unidades dejan de contar en `vendido_desde_conteo` (solo si esa venta había descontado del conteo vigente). Si la venta referenciada no existe o ya fue anulada, se rechaza con `422`.
-- **Ventas posteriores al conteo:** solo descuentan las líneas con `emitido_at > conteo_at`. Una venta anterior que llega tarde no descuenta del conteo nuevo.
+- **Ventas posteriores al conteo:** solo descuentan las líneas con `emitido_at ≥ conteo_at` (una venta en el mismo segundo que el conteo descuenta: ante la duda, la alerta llega antes). Una venta anterior que llega tarde no descuenta del conteo nuevo.
 - **Producto sin conteo:** la venta se registra, el estado queda `SIN_CONTEO` y se crea la alerta `RECONTAR`.
 - **Venta mayor al conteo:** `stock_gondola` queda en 0, la diferencia se acumula en `desvio` y se crea la alerta `VERIFICAR`. La venta nunca se rechaza.
 
