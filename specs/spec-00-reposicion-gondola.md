@@ -104,7 +104,7 @@ El repositor elige un producto (escaneando el código de barras o buscándolo) e
   y se guarda un `conteo` con `esperado = 3, diferencia = +9`.
 - Un conteo **mayor que la capacidad** se acepta, pero se pide confirmación ("¿Superás la capacidad de 12?").
 - Un conteo **negativo o no numérico** se rechaza.
-- Al registrar el conteo, las alertas `REPONER`, `VACIO` y `RECONTAR` abiertas de ese producto pasan a `ATENDIDA`, con `atendida_por` = repositor.
+- Al registrar el conteo, las alertas `REPONER`, `VERIFICAR` y `RECONTAR` abiertas de ese producto pasan a `ATENDIDA`, con `atendida_por` = repositor.
 - Registrar un conteo debe llevar **≤ 3 toques** después de escanear el producto.
 
 ### RF-02 · Descontar stock por venta (comprobante)
@@ -114,7 +114,7 @@ Cuando la caja emite un comprobante, el sistema registra la `venta` y, **en una 
   **entonces** Leche queda con `vendido_desde_conteo = 2`, `stock_gondola = 10`, `nivel = 83%`, y Arroz se descuenta en la misma transacción.
 - **Idempotencia:** un `comprobante_id` ya procesado se ignora y responde `200` con el resultado original.
 - **Líneas repetidas:** si el mismo producto aparece en varias líneas, se suman antes de descontar.
-- **Anulación / devolución:** un comprobante `ANULACION` que referencia una venta resta sus unidades de `vendido_desde_conteo`, sin bajar de 0. Si la venta referenciada no existe, se rechaza con `422`.
+- **Anulación / devolución:** un comprobante `ANULACION` (sin líneas) anula **completa** la venta referenciada: sus unidades dejan de contar en `vendido_desde_conteo` (solo si esa venta había descontado del conteo vigente). Si la venta referenciada no existe o ya fue anulada, se rechaza con `422`.
 - **Ventas posteriores al conteo:** solo descuentan las líneas con `emitido_at > conteo_at`. Una venta anterior que llega tarde no descuenta del conteo nuevo.
 - **Producto sin conteo:** la venta se registra, el estado queda `SIN_CONTEO` y se crea la alerta `RECONTAR`.
 - **Venta mayor al conteo:** `stock_gondola` queda en 0, la diferencia se acumula en `desvio` y se crea la alerta `VERIFICAR`. La venta nunca se rechaza.
@@ -132,7 +132,7 @@ Cada producto expone:
 | `SIN_DEPOSITO` | stock_gondola ≤ umbral **y** depósito = 0 |
 | `BAJO` | stock_gondola ≤ umbral |
 | `OK` | stock_gondola > umbral |
-| `SIN_CONTEO` | Nunca se contó, o el último conteo tiene más de 24 h |
+| `SIN_CONTEO` | Nunca se contó (un conteo de más de 24 h no cambia el estado: genera la alerta `RECONTAR`) |
 
 ### RF-04 · Alerta urgente al llegar al umbral
 Después de cada actualización (venta o conteo), el sistema evalúa:
@@ -173,7 +173,7 @@ Tabla de todos los productos de la sucursal con estado, nivel, depósito, desví
 | `GET` | `/sucursales/{s}/stream` | Server-Sent Events: `producto.actualizado`, `alerta.creada`, `alerta.cerrada` |
 | `PATCH` | `/alertas/{id}` | Descartar una alerta (con motivo) |
 
-`POST /ventas` aplica la venta completa de forma atómica y responde `201`; si el comprobante ya fue procesado, responde `200` (idempotente por `comprobante_id`). Una venta sin líneas o con cantidades ≤ 0 se rechaza con `422`.
+`POST /ventas` aplica la venta completa de forma atómica y responde `201`; si el comprobante ya fue procesado, responde `200` (idempotente por `comprobante_id`). Una `VENTA` sin líneas o con cantidades ≤ 0 se rechaza con `422`.
 
 ---
 
