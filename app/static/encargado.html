@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stocky · Encargado</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <span class="dot" id="dot" title="Conexión en vivo"></span>
+  <h1>Estado de sucursal</h1>
+  <select id="suc" aria-label="Sucursal"></select>
+</header>
+<main style="max-width:1500px">
+  <h2>Alertas para el encargado</h2>
+  <div id="alertas"></div>
+
+  <h2>Productos</h2>
+  <div class="chips" id="chips"></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Producto</th><th>Estado</th><th>Góndola</th><th>Nivel</th><th>Umbral</th><th>Venta/h</th>
+        <th>Depósito</th><th>Stock general</th><th>Vendido hoy</th><th>Pérdida hoy</th><th>Último conteo</th><th>Alertas</th>
+        <th>Simular caja</th>
+      </tr></thead>
+      <tbody id="tabla"></tbody>
+    </table>
+  </div>
+
+  <h2>Simulador de caja</h2>
+  <div class="row" style="justify-content:flex-start">
+    <button class="big" id="auto" type="button">▶ Venta automática</button>
+    <span class="muted">Emite un comprobante al azar cada 3 s (reemplaza al POS en la demo).</span>
+  </div>
+</main>
+<div id="toast" role="status" aria-live="assertive"></div>
+
+<script src="/common.js"></script>
+<script>
+const ESTADOS = ["TODOS", "VACIO", "BAJO", "SIN_DEPOSITO", "SIN_CONTEO", "OK"];
+let suc, stop, filtro = "TODOS", productos = [], ultimas = [], autoTimer = null;
+
+function render() {
+  $("#chips").innerHTML = ESTADOS.map((e) => `<button type="button" class="${e === filtro ? "on" : ""}" data-f="${e}">${e.replace("_", " ")}</button>`).join("");
+  const filas = productos.filter((p) => filtro === "TODOS" || p.estado === filtro);
+  $("#tabla").innerHTML = filas.map((p) => `<tr>
+      <td><b>${esc(p.nombre)}</b><br><span class="muted">${esc(p.producto_id)}</span></td>
+      <td><span class="badge ${esc(p.estado)}">${esc(p.estado.replace("_", " "))}</span></td>
+      <td>${p.stock_gondola} de ${p.conteo_informado ?? "?"}</td>
+      <td style="min-width:90px">${p.nivel}% ${nivelBar(p)}</td>
+      <td>${p.umbral}</td><td>${p.venta_hora ?? "—"}</td><td>${p.deposito}</td><td>${p.stock_general ?? "—"}</td>
+      <td>${p.vendido_hoy}</td><td>${p.desvio_hoy || 0}</td>
+      <td>${hhmm(p.conteo_at)} ${p.conteo_por ? "· " + esc(p.conteo_por) : ""}${p.conteo_vencido ? " ⚠️" : ""}</td>
+      <td>${p.alertas.map((a) => `<span class="badge ${esc(a.prioridad)}">${esc(a.tipo)}</span>`).join(" ")}</td>
+      <td><button data-vender="${esc(p.producto_id)}" data-n="1">−1</button> <button data-vender="${esc(p.producto_id)}" data-n="3">−3</button></td>
+    </tr>`).join("") || `<tr><td colspan="13" class="empty">Sin productos en este estado</td></tr>`;
+}
+
+async function cargar() {
+  const [prods, alertas] = await Promise.all([
+    api("GET", `/sucursales/${suc}/productos`), api("GET", `/sucursales/${suc}/alertas?destinatario=ENCARGADO`)]);
+  productos = prods.data || [];
+  const nombres = Object.fromEntries(productos.map((p) => [p.producto_id, p.nombre]));
+  $("#alertas").innerHTML = (alertas.data || []).map((a) => `<div class="card ${esc(a.prioridad)}"><div class="row">
+      <span><b>${esc(nombres[a.producto_id] || a.producto_id)}</b> · sin mercadería en depósito (desde ${hhmm(a.creada_at)})</span>
+      <span class="badge ${esc(a.prioridad)}">${esc(a.tipo.replace("_", " "))}</span></div></div>`).join("")
+    || `<div class="empty">Sin alertas</div>`;
+  render();
+}
+
+async function vender(pid, n) {
+  const cid = `SIM-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const r = await api("POST", "/ventas", { comprobante_id: cid, sucursal_id: suc, emitido_at: nowIso(),
+    lineas: [{ linea: 1, producto_id: pid, cantidad: n }] });
+  if (r.status >= 400) toast(r.data?.error || "Error");
+}
+
+document.addEventListener("click", (e) => {
+  const f = e.target.closest("[data-f]");
+  if (f) { filtro = f.dataset.f; render(); }
+  const v = e.target.closest("[data-vender]");
+  if (v) vender(v.dataset.vender, Number(v.dataset.n));
+});
+
+$("#auto").onclick = () => {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; $("#auto").textContent = "▶ Venta automática"; return; }
+  $("#auto").textContent = "⏸ Detener";
+  autoTimer = setInterval(() => {
+    const vendibles = productos.filter((p) => p.conteo_at);
+    if (vendibles.length) vender(vendibles[Math.floor(Math.random() * vendibles.length)].producto_id, 1);
+  }, 3000);
+};
+
+function onEvent(e) {
+  if (!e) return cargar();
+  if (e.type === "alerta.creada" && e.data.destinatario === "ENCARGADO") toast(`Sin depósito: ${e.data.nombre}`, "#6a1b9a");
+}
+
+loadSucursales($("#suc"), (s) => { suc = s; stop?.(); stop = live(s, onEvent, $("#dot")); });
+</script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stocky · Repositor</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <span class="dot" id="dot" title="Conexión en vivo"></span>
+  <h1>Reposición</h1>
+  <select id="suc" aria-label="Sucursal"></select>
+  <input id="quien" placeholder="Tu nombre" aria-label="Tu nombre" style="font:inherit;padding:6px 10px;border-radius:8px;border:0;width:130px">
+  <button id="notif" type="button">🔔 Activar avisos</button>
+</header>
+<main>
+  <div class="row"><h2>Reponer ahora</h2><span class="muted" id="minutos"></span></div>
+  <div id="lista"></div>
+  <p class="muted" id="pendientes"></p>
+
+  <h2>Todos los productos</h2>
+  <input type="search" id="buscar" placeholder="Buscar producto o código…" aria-label="Buscar producto">
+  <div id="todos" style="margin-top:10px"></div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="form">
+    <div class="name" id="dlg-nombre"></div>
+    <div class="muted" id="dlg-info"></div>
+    <p style="margin:12px 0 0">¿Cuántas unidades hay ahora en la góndola?</p>
+    <div class="stepper">
+      <button type="button" id="menos" aria-label="Restar uno">−</button>
+      <input type="number" id="unidades" min="0" inputmode="numeric" required aria-label="Unidades en góndola">
+      <button type="button" id="mas" aria-label="Sumar uno">+</button>
+    </div>
+    <div class="row">
+      <button type="button" class="big ghost" id="cancelar">Cancelar</button>
+      <button class="big" id="guardar">Guardar conteo</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" role="status" aria-live="assertive"></div>
+
+<script src="/common.js"></script>
+<script>
+const PRIO_AVISO = new Set(["URGENTE", "ALTA"]);
+let suc, stop, productos = [], actual = null;
+
+// Name recorded on every count (RNF-07). No auth in the MVP.
+$("#quien").value = store("repositor") || "";
+$("#quien").onchange = () => store("repositor", $("#quien").value.trim());
+const repositor = () => $("#quien").value.trim() || "repositor";
+
+// ---------- render ----------
+function tarjeta(i) {
+  const titulo = { REPONER: `Reponer ${i.unidades_sugeridas} u. · ${i.tiempo_reposicion_min} min`,
+                   VERIFICAR: "Verificar góndola", RECONTAR: "Recontar" }[i.tipo];
+  const vacia = i.stock_gondola === 0 ? "Góndola vacía" : i.horas_a_vacio != null ? `Se vacía en ~${i.horas_a_vacio} h` : "";
+  return `<div class="card ${esc(i.prioridad)}">
+    <div class="row"><span class="name">${esc(i.nombre)}</span><span class="badge ${esc(i.prioridad)}">${esc(i.prioridad)}</span></div>
+    <div class="row"><span><b>${i.stock_gondola} de ${i.conteo_informado ?? "?"}</b> · ${i.nivel}%</span><span class="muted">${esc(vacia)}</span></div>
+    ${nivelBar(i)}
+    <div class="row"><span><b>${esc(titulo)}</b><br><span class="muted">Último conteo ${hhmm(i.conteo_at)}${i.conteo_por ? " · " + esc(i.conteo_por) : ""}</span></span>
+      <button class="big" data-p="${esc(i.producto_id)}" data-sug="${i.tipo === "REPONER" ? i.stock_gondola + i.unidades_sugeridas : ""}">${i.tipo === "REPONER" ? "Repuse" : "Contar"}</button></div>
+  </div>`;
+}
+
+function renderTodos() {
+  const f = $("#buscar").value.trim().toLowerCase();
+  const items = productos.filter((p) => !f || p.nombre.toLowerCase().includes(f) || p.producto_id.toLowerCase().includes(f));
+  $("#todos").innerHTML = items.map((p) => `<div class="card">
+      <div class="row"><span class="name">${esc(p.nombre)}</span><span class="badge ${esc(p.estado)}">${esc(p.estado.replace("_", " "))}</span></div>
+      <div class="row"><span>${p.stock_gondola} de ${p.conteo_informado ?? "?"} · ${p.nivel}%</span>
+        <button class="big ghost" data-p="${esc(p.producto_id)}" data-sug="">Contar</button></div>
+      ${nivelBar(p)}</div>`).join("") || `<div class="empty">Sin resultados</div>`;
+}
+
+async function cargar() {
+  const [rep, prods] = await Promise.all([api("GET", `/sucursales/${suc}/reposicion`), api("GET", `/sucursales/${suc}/productos`)]);
+  productos = prods.data || [];
+  const items = rep.data?.items || [];
+  $("#lista").innerHTML = items.map(tarjeta).join("") || `<div class="empty">✅ Nada para reponer</div>`;
+  $("#minutos").textContent = items.length ? `Total: ${rep.data.total_minutos} min` : "";
+  renderTodos();
+}
+
+// ---------- count (RF-01: tap "Repuse" -> confirm number -> save) ----------
+function abrirConteo(pid, sugerido) {
+  actual = productos.find((p) => p.producto_id === pid);
+  if (!actual) return;
+  $("#dlg-nombre").textContent = actual.nombre;
+  $("#dlg-info").textContent = `Capacidad ${actual.capacidad ?? "?"} · el sistema calcula ${actual.stock_gondola}`;
+  $("#unidades").value = sugerido !== "" ? Math.min(sugerido, actual.capacidad ?? sugerido) : actual.stock_gondola;
+  $("#dlg").showModal();
+  $("#unidades").select();
+}
+
+async function enviarConteo(body) {
+  try {
+    const r = await api("POST", `/sucursales/${suc}/conteos`, body);
+    if (r.status === 409 && confirm(r.data.error)) return enviarConteo({ ...body, confirmar_capacidad: true });
+    if (r.status >= 400) return toast(r.data?.error || "Error al guardar");
+    toast(`Conteo guardado: ${body.unidades} u.`, "var(--ok)");
+  } catch {
+    // Offline (RNF-04): queue with the device time and retry later.
+    const cola = store("cola") || [];
+    cola.push({ suc, body });
+    store("cola", cola);
+    toast("Sin conexión: el conteo se enviará al reconectar", "var(--alta)");
+  }
+}
+
+async function vaciarCola() {
+  const cola = store("cola") || [];
+  if (!cola.length) return;
+  store("cola", []);
+  for (const { suc: s, body } of cola) {
+    try { await api("POST", `/sucursales/${s}/conteos`, { ...body, confirmar_capacidad: true }); }
+    catch { const c = store("cola") || []; c.push({ suc: s, body }); store("cola", c); }
+  }
+  $("#pendientes").textContent = (store("cola") || []).length ? "Conteos pendientes de envío" : "";
+}
+
+$("#form").onsubmit = (e) => {
+  e.preventDefault();
+  const n = Number($("#unidades").value);
+  if (!Number.isInteger(n) || n < 0) return toast("Ingresá un número entero ≥ 0");
+  $("#dlg").close();
+  enviarConteo({ producto_id: actual.producto_id, unidades: n, repositor_id: repositor(), tipo: "REPOSICION", created_at: nowIso() });
+};
+$("#cancelar").onclick = () => $("#dlg").close();
+$("#menos").onclick = () => ($("#unidades").value = Math.max(0, Number($("#unidades").value) - 1));
+$("#mas").onclick = () => ($("#unidades").value = Number($("#unidades").value) + 1);
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-p]");
+  if (b) abrirConteo(b.dataset.p, b.dataset.sug === "" ? "" : Number(b.dataset.sug));
+});
+$("#buscar").oninput = renderTodos;
+
+// ---------- alerts (RF-04) ----------
+function beep() {
+  try {
+    const ctx = new AudioContext(), o = ctx.createOscillator();
+    o.connect(ctx.destination); o.frequency.value = 880; o.start(); o.stop(ctx.currentTime + 0.3);
+  } catch {}
+}
+
+function avisar(a) {
+  const texto = `${a.prioridad} · ${a.nombre} (${suc}) · quedan ${a.stock_gondola} de ${a.conteo_informado ?? "?"}` +
+    (a.unidades_sugeridas ? ` · reponer ${a.unidades_sugeridas} u.` : "");
+  toast(texto);
+  beep();
+  navigator.vibrate?.([200, 100, 200]);
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification("Stocky · reponer", { body: texto, tag: `alerta-${a.id}`, renotify: true, requireInteraction: a.prioridad === "URGENTE" });
+  }
+}
+
+$("#notif").onclick = async () => {
+  if (!("Notification" in window)) return toast("Este navegador no soporta notificaciones");
+  const p = await Notification.requestPermission();
+  $("#notif").textContent = p === "granted" ? "🔔 Avisos activos" : "🔕 Avisos bloqueados";
+};
+if ("Notification" in window && Notification.permission === "granted") $("#notif").textContent = "🔔 Avisos activos";
+
+function onEvent(e) {
+  if (!e) return cargar();
+  if (e.type === "alerta.creada" && e.data.destinatario === "REPOSITOR" && PRIO_AVISO.has(e.data.prioridad)) avisar(e.data);
+}
+
+loadSucursales($("#suc"), (s) => {
+  suc = s;
+  stop?.();
+  stop = live(s, onEvent, $("#dot"));
+  vaciarCola();
+});
+addEventListener("online", vaciarCola);
+</script>
+</body>
+</html>

@@ -454,9 +454,9 @@ class Stock:
         items = []
         for a in self.alertas(s, "REPOSITOR"):
             snap = self.snapshot(s, a["producto_id"], now)
-            items.append({**a, **{k: snap[k] for k in (
+            items.append({**a, "estado_producto": snap["estado"], **{k: snap[k] for k in (
                 "nombre", "precio", "stock_gondola", "conteo_informado", "nivel", "capacidad",
-                "horas_a_vacio", "tiempo_reposicion_min", "conteo_at", "conteo_por", "estado", "deposito")}})
+                "horas_a_vacio", "tiempo_reposicion_min", "conteo_at", "conteo_por", "deposito")}})
         items.sort(key=lambda i: (PRIORIDADES.index(i["prioridad"]),
                                   i["horas_a_vacio"] if i["horas_a_vacio"] is not None else
                                   (0 if i["stock_gondola"] == 0 else math.inf),

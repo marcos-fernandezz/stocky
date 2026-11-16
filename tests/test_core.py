@@ -261,6 +261,7 @@ class Reposicion(Base):
         self.assertEqual([(i["producto_id"], i["prioridad"]) for i in lista["items"]],
                          [("ID-4", "URGENTE"), ("ID-3", "ALTA")])
         self.assertEqual(lista["total_minutos"], 5 + 6)
+        self.assertEqual({i["estado"] for i in lista["items"]}, {"ABIERTA"})  # alert state, not product state
 
 
 if __name__ == "__main__":
