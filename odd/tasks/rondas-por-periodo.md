@@ -15,7 +15,7 @@ Branch: `feat/rondas-periodo` · Delivery: ask-on-risk · Tests: `npm test` (vit
 
 | ID | Specs | Route | Status | Evidence |
 |---|---|---|---|---|
-| T1 | S1-S6 | inline | in progress | domain + schema + API + UI + tests + docs, one behavior change |
+| T1 | S1-S6 | inline (no writer trigger: one behavior) | done, verification pending | RED 19 failing → GREEN 26/26; `next build` OK; smoke on pglite OK; commits 65e5fb3 (core), 30aad6f (UI + docs) |
 
 ## Log
 
@@ -25,3 +25,4 @@ Branch: `feat/rondas-periodo` · Delivery: ask-on-risk · Tests: `npm test` (vit
 - **L4** — "como indica el repositor el quiebre? es decir en teoria de esta forma no deberiamos tener quiebre pero en caso que ocurre como lo marca el repositor?" → agreed design in S6.
 - **L5** — "si, me cierra, arranca con la implementacion"
 - **L6** — Decisions: anomaly is evaluated continuously in the tick against the expected sales of the same elapsed window (not only at period close), so it fires earlier and equals the close evaluation at the end. A sale during an open quiebre closes it. Schema change via `0002_rondas.sql` (drops `conteo` and the count columns).
+- **L7** — T1 implemented. Risk: item 1 (0002 drops `conteo` and count columns). `gentle-ai review assess` → high / review_due. Independent verifier launched before native review.
