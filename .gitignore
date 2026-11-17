@@ -7,3 +7,7 @@ next-env.d.ts
 *.tsbuildinfo
 .vercel
 .env*
+
+# Hackathon organizer material and photos (kept local, not published)
+Hackaton_*.pdf
+WhatsApp Image *.jpeg
